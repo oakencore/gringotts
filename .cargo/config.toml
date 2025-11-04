@@ -1,0 +1,17 @@
+[build]
+# Parallel codegen for faster builds
+jobs = 8
+
+# Note: Uncomment the linker configuration below if you have lld (macOS) or mold (Linux) installed
+# for faster linking. Installation:
+# - macOS: brew install llvm (provides lld)
+# - Linux: cargo install mold
+
+# [target.x86_64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# [target.aarch64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
