@@ -13,6 +13,11 @@ pub enum Chain {
     Optimism,
     Avalanche,
     Base,
+    Core,
+    Near,
+    Aptos,
+    Sui,
+    Starknet,
 }
 
 impl Chain {
@@ -26,6 +31,11 @@ impl Chain {
             "optimism" | "op" => Ok(Chain::Optimism),
             "avalanche" | "avax" => Ok(Chain::Avalanche),
             "base" => Ok(Chain::Base),
+            "core" => Ok(Chain::Core),
+            "near" => Ok(Chain::Near),
+            "aptos" | "apt" => Ok(Chain::Aptos),
+            "sui" => Ok(Chain::Sui),
+            "starknet" | "stark" => Ok(Chain::Starknet),
             _ => anyhow::bail!("Unknown chain: {}", s),
         }
     }
@@ -40,11 +50,46 @@ impl Chain {
             Chain::Optimism => "Optimism",
             Chain::Avalanche => "Avalanche C-Chain",
             Chain::Base => "Base",
+            Chain::Core => "Core",
+            Chain::Near => "NEAR Protocol",
+            Chain::Aptos => "Aptos",
+            Chain::Sui => "Sui",
+            Chain::Starknet => "Starknet",
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_evm(&self) -> bool {
-        !matches!(self, Chain::Solana)
+        matches!(
+            self,
+            Chain::Ethereum
+                | Chain::Polygon
+                | Chain::BinanceSmartChain
+                | Chain::Arbitrum
+                | Chain::Optimism
+                | Chain::Avalanche
+                | Chain::Base
+                | Chain::Core
+        )
+    }
+
+    /// Get the native token symbol for this chain
+    pub fn native_token_symbol(&self) -> &str {
+        match self {
+            Chain::Solana => "SOL",
+            Chain::Ethereum => "ETH",
+            Chain::Polygon => "MATIC",
+            Chain::BinanceSmartChain => "BNB",
+            Chain::Arbitrum => "ETH",
+            Chain::Optimism => "ETH",
+            Chain::Avalanche => "AVAX",
+            Chain::Base => "ETH",
+            Chain::Core => "CORE",
+            Chain::Near => "NEAR",
+            Chain::Aptos => "APT",
+            Chain::Sui => "SUI",
+            Chain::Starknet => "STRK",
+        }
     }
 }
 
@@ -54,6 +99,8 @@ fn default_chain() -> Chain {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WalletAddress {
+    #[serde(default)]
+    pub company: String,
     pub name: String,
     pub address: String,
     #[serde(default = "default_chain")]
@@ -105,6 +152,7 @@ impl AddressBook {
 
         // Clean up any whitespace
         for addr in &mut book.addresses {
+            addr.company = addr.company.trim().to_string();
             addr.name = addr.name.trim().to_string();
             addr.address = addr.address.trim().to_string();
             // Chain is already stored in JSON, trust it
@@ -131,8 +179,9 @@ impl AddressBook {
         Ok(())
     }
 
-    pub fn add_address(&mut self, name: String, address: String, chain: Option<String>) -> Result<()> {
+    pub fn add_address(&mut self, company: String, name: String, address: String, chain: Option<String>) -> Result<()> {
         // Trim whitespace from inputs
+        let company = company.trim().to_string();
         let name = name.trim().to_string();
         let address = address.trim().to_string();
 
@@ -145,6 +194,7 @@ impl AddressBook {
         let chain = Self::detect_chain(&address, chain.as_deref())?;
 
         self.addresses.push(WalletAddress {
+            company,
             name,
             address,
             chain,

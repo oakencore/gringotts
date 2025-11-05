@@ -12,7 +12,8 @@ fn get_default_rpc_url(chain: &Chain) -> &'static str {
         Chain::Optimism => "https://mainnet.optimism.io",
         Chain::Avalanche => "https://api.avax.network/ext/bc/C/rpc",
         Chain::Base => "https://mainnet.base.org",
-        Chain::Solana => panic!("Solana is not an EVM chain"),
+        Chain::Core => "https://rpc.coredao.org",
+        _ => panic!("Chain is not an EVM chain"),
     }
 }
 
@@ -53,7 +54,11 @@ fn get_common_tokens(chain: &Chain) -> Vec<(&'static str, &'static str)> {
             ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "USDC"),
             ("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", "DAI"),
         ],
-        Chain::Solana => vec![],
+        Chain::Core => vec![
+            ("0xa4151B2B3e269645181dCcF2D426cE75fcbDeca9", "USDT"),
+            ("0x900101d06A7426441Ae63e9AB3B9b0F63Be145F1", "USDC"),
+        ],
+        _ => vec![],
     }
 }
 

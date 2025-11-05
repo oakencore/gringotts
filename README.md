@@ -1,10 +1,10 @@
 # Gringotts
 
-CLI for tracking cryptocurrency balances across Solana and EVM chains with USD pricing.
+CLI interface for tracking cryptocurrency balances across multiple blockchains.
 
 ## Setup
 
-Get a free CoinMarketCap API key at https://coinmarketcap.com/api/ (10,000 calls/month).
+Get a CoinMarketCap API key at https://coinmarketcap.com/api/ 
 
 ```bash
 export COINMARKETCAP_API_KEY="your-api-key-here"
@@ -24,7 +24,8 @@ cargo install --path .
 ```bash
 # Add addresses
 gringotts add --name "Wallet" --address <address>
-gringotts add --name "Wallet" --address <address> --chain polygon
+gringotts add --name "Wallet" --address <address> --chain solana
+gringotts add --name "Wallet" --address <address> --chain aptos --company "ACMECORP"
 
 # List tracked addresses
 gringotts list
@@ -39,22 +40,40 @@ gringotts query-one "Wallet"
 gringotts remove "Wallet"
 ```
 
+### Organisation
+
+You can use the `--company` flag to group wallets by 'organisation'. This can be useful if you want to subcategorise addresses in addition to giving them names.
+
+```bash
+gringotts add --name "Hot Wallet" --address <address> --company "ACMECORP"
+gringotts add --name "Cold Storage" --address <address> --company "SALLYS"
+```
+
+Portfolio summary displays assets grouped by the company flag.
+
 ### Supported Chains
 
-**Solana**: `solana`, `sol`
-**Ethereum**: `ethereum`, `eth` (default for 0x addresses)
-**Polygon**: `polygon`, `matic`
-**BSC**: `bsc`, `binance`, `bnb`
-**Arbitrum**: `arbitrum`, `arb`
-**Optimism**: `optimism`, `op`
-**Avalanche**: `avalanche`, `avax`
-**Base**: `base`
+**Layer 1**
+- Solana: `solana`, `sol`
+- Ethereum: `ethereum`, `eth` (This is the default for 0x addresses currently)
+- NEAR: `near`
+- Aptos: `aptos`, `apt`
+- Sui: `sui`
+- Core: `core`
 
-EVM addresses auto-detect as Ethereum. Specify `--chain` for other EVM networks.
+**Layer 2 / EVM**
+- Polygon: `polygon`, `matic`
+- BSC: `bsc`, `binance`, `bnb`
+- Arbitrum: `arbitrum`, `arb`
+- Optimism: `optimism`, `op`
+- Avalanche: `avalanche`, `avax`
+- Base: `base`
+- Starknet: `starknet`, `stark`
+
 
 ### Custom RPC
 
-Use your own RPC endpoints for better rate limits or specific networks:
+Free RPC enpoints often have harsh rate limits, so you can use your own RPC endpoints for better rate limits or specific networks:
 
 ```bash
 # Solana
@@ -66,24 +85,6 @@ gringotts query --rpc-url https://eth.llamarpc.com
 gringotts query --rpc-url https://polygon-rpc.com
 gringotts query --rpc-url https://arb1.arbitrum.io/rpc
 ```
-
-## Features
-
-**Solana**
-- SOL balance with USD pricing
-- SPL token detection via Metaplex metadata
-- Supported tokens: USDC, USDT, mSOL, stSOL, SWTCH, JTO, RAT
-
-**EVM Chains**
-- Native balance (ETH, MATIC, BNB, etc.)
-- ERC20 tokens: USDC, USDT, DAI (varies by chain)
-- Contract-based token metadata
-
-**Portfolio**
-- Aggregated asset view across all chains
-- Total portfolio value in USD
-- Real-time pricing via CoinMarketCap API
-
 ## Storage
 
 Addresses: `~/.gringotts/addresses.json`

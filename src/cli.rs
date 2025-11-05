@@ -12,6 +12,10 @@ pub struct Cli {
 pub enum Commands {
     /// Add a blockchain address to track (Solana, Ethereum, Polygon, etc.)
     Add {
+        /// Company/organization for this address
+        #[arg(short, long, default_value = "")]
+        company: String,
+
         /// Name/label for this address
         #[arg(short, long)]
         name: String,
@@ -20,9 +24,9 @@ pub enum Commands {
         #[arg(short, long)]
         address: String,
 
-        /// Blockchain chain (solana, ethereum, polygon, bsc, arbitrum, optimism, avalanche, base)
+        /// Blockchain chain (solana, ethereum, polygon, bsc, arbitrum, optimism, avalanche, base, core, near, aptos, sui, starknet)
         /// If not specified, chain is auto-detected based on address format
-        #[arg(short, long)]
+        #[arg(long)]
         chain: Option<String>,
     },
 

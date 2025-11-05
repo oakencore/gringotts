@@ -290,6 +290,45 @@ impl PriceService {
         Ok(prices)
     }
 
+    /// Batch fetch prices for a specific list of symbols
+    pub async fn batch_fetch_prices(&self, symbols: &[String]) -> Result<HashMap<String, f64>> {
+        if symbols.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let api_key = Self::get_api_key()?;
+        let symbols_str = symbols.join(",");
+        let url = format!("{}?symbol={}&convert=USD", CMC_QUOTE_API, symbols_str);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-CMC_PRO_API_KEY", api_key)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("Failed to batch fetch prices from CoinMarketCap")?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Could not read response".to_string());
+            anyhow::bail!("CoinMarketCap API returned error: {}", error_text);
+        }
+
+        let cmc_response: CmcResponse = response
+            .json()
+            .await
+            .context("Failed to parse batch fetch response")?;
+
+        let mut prices = HashMap::new();
+        for (symbol, quote_data) in cmc_response.data {
+            if let Some(usd_quote) = quote_data.quote.get("USD") {
+                prices.insert(symbol, usd_quote.price);
+            }
+        }
+
+        Ok(prices)
+    }
+
     /// Batch fetch all prices for known symbols in a single API call
     /// This is more efficient than making separate calls for SOL, ETH, and tokens
     pub async fn batch_fetch_all_known_prices(&self) -> Result<HashMap<String, f64>> {
