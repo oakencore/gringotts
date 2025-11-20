@@ -14,3 +14,20 @@ Thumbs.db
 
 # Application data
 .gringotts/
+
+# Local tests
+local_tests/
+
+# Node
+node_modules/
+
+# Environment files (API keys)
+.env
+.env.*
+.env.local
+
+# Logs
+*.log
+
+# Price feed config (user-specific)
+feedIds.json

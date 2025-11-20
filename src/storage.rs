@@ -20,6 +20,29 @@ pub enum Chain {
     Starknet,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BankingService {
+    Mercury,
+    Circle,
+}
+
+impl BankingService {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "mercury" => Ok(BankingService::Mercury),
+            "circle" => Ok(BankingService::Circle),
+            _ => anyhow::bail!("Unknown banking service: {}", s),
+        }
+    }
+
+    pub fn display_name(&self) -> &str {
+        match self {
+            BankingService::Mercury => "Mercury Banking",
+            BankingService::Circle => "Circle",
+        }
+    }
+}
+
 impl Chain {
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
@@ -107,15 +130,27 @@ pub struct WalletAddress {
     pub chain: Chain,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BankingAccount {
+    #[serde(default)]
+    pub company: String,
+    pub name: String,
+    pub account_id: String,
+    pub service: BankingService,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddressBook {
     pub addresses: Vec<WalletAddress>,
+    #[serde(default)]
+    pub banking_accounts: Vec<BankingAccount>,
 }
 
 impl AddressBook {
     pub fn new() -> Self {
         Self {
             addresses: Vec::new(),
+            banking_accounts: Vec::new(),
         }
     }
 
@@ -219,5 +254,42 @@ impl AddressBook {
             .context("Failed to get home directory")?;
 
         Ok(home.join(".gringotts").join("addresses.json"))
+    }
+
+    pub fn add_banking_account(&mut self, company: String, name: String, account_id: String, service: String) -> Result<()> {
+        // Trim whitespace from inputs
+        let company = company.trim().to_string();
+        let name = name.trim().to_string();
+        let account_id = account_id.trim().to_string();
+
+        // Check if name already exists in either addresses or banking accounts
+        if self.addresses.iter().any(|a| a.name == name) {
+            anyhow::bail!("Address with name '{}' already exists", name);
+        }
+        if self.banking_accounts.iter().any(|a| a.name == name) {
+            anyhow::bail!("Banking account with name '{}' already exists", name);
+        }
+
+        let service = BankingService::from_str(&service)?;
+
+        self.banking_accounts.push(BankingAccount {
+            company,
+            name,
+            account_id,
+            service,
+        });
+        Ok(())
+    }
+
+    pub fn remove_banking_account_by_identifier(&mut self, identifier: &str) -> Result<()> {
+        let initial_len = self.banking_accounts.len();
+        // Remove by name or account_id
+        self.banking_accounts.retain(|a| a.name != identifier && a.account_id != identifier);
+
+        if self.banking_accounts.len() == initial_len {
+            anyhow::bail!("Banking account with name or account ID '{}' not found", identifier);
+        }
+
+        Ok(())
     }
 }

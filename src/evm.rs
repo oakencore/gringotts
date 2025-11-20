@@ -3,17 +3,17 @@ use crate::storage::Chain;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-fn get_default_rpc_url(chain: &Chain) -> &'static str {
+fn get_default_rpc_url(chain: &Chain) -> Result<&'static str> {
     match chain {
-        Chain::Ethereum => "https://eth.llamarpc.com",
-        Chain::Polygon => "https://polygon-rpc.com",
-        Chain::BinanceSmartChain => "https://bsc-dataseed.binance.org",
-        Chain::Arbitrum => "https://arb1.arbitrum.io/rpc",
-        Chain::Optimism => "https://mainnet.optimism.io",
-        Chain::Avalanche => "https://api.avax.network/ext/bc/C/rpc",
-        Chain::Base => "https://mainnet.base.org",
-        Chain::Core => "https://rpc.coredao.org",
-        _ => panic!("Chain is not an EVM chain"),
+        Chain::Ethereum => Ok("https://eth.llamarpc.com"),
+        Chain::Polygon => Ok("https://polygon-rpc.com"),
+        Chain::BinanceSmartChain => Ok("https://bsc-dataseed.binance.org"),
+        Chain::Arbitrum => Ok("https://arb1.arbitrum.io/rpc"),
+        Chain::Optimism => Ok("https://mainnet.optimism.io"),
+        Chain::Avalanche => Ok("https://api.avax.network/ext/bc/C/rpc"),
+        Chain::Base => Ok("https://mainnet.base.org"),
+        Chain::Core => Ok("https://rpc.coredao.org"),
+        _ => anyhow::bail!("Chain {:?} is not an EVM chain", chain),
     }
 }
 
@@ -108,18 +108,21 @@ struct JsonRpcError {
 }
 
 impl EvmClient {
-    pub fn new(rpc_url: Option<String>, chain: Chain) -> Self {
-        let url = rpc_url.unwrap_or_else(|| get_default_rpc_url(&chain).to_string());
+    pub fn new(rpc_url: Option<String>, chain: Chain) -> Result<Self> {
+        let url = match rpc_url {
+            Some(u) => u,
+            None => get_default_rpc_url(&chain)?.to_string(),
+        };
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        Self {
+        Ok(Self {
             client,
             rpc_url: url,
             chain,
-        }
+        })
     }
 
     async fn rpc_call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {

@@ -1,6 +1,8 @@
 mod aptos;
+mod circle;
 mod cli;
 mod evm;
+mod mercury;
 mod near;
 mod price;
 mod solana;
@@ -11,16 +13,19 @@ mod ui;
 
 use anyhow::Result;
 use aptos::AptosClient;
+use circle::CircleClient;
 use clap::Parser;
 use cli::{Cli, Commands};
 use evm::EvmClient;
+use mercury::MercuryClient;
 use near::NearClient;
 use price::PriceService;
 use solana::SolanaClient;
 use starknet::StarknetClient;
-use storage::{AddressBook, Chain, WalletAddress};
+use storage::{AddressBook, BankingAccount, BankingService, Chain, WalletAddress};
 use sui::SuiClient;
 use std::collections::{HashMap, HashSet};
+use std::io::{self, BufRead, Write};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Debug)]
@@ -43,6 +48,38 @@ pub struct PortfolioSummary {
     pub total_usd_value: f64,
 }
 
+// Helper functions for portfolio aggregation
+fn get_company_key(company: &str) -> &str {
+    if company.is_empty() { "Uncategorized" } else { company }
+}
+
+fn add_asset_to_portfolio(
+    portfolio: &mut PortfolioSummary,
+    company: &str,
+    symbol: &str,
+    amount: f64,
+    usd_value: Option<f64>,
+) {
+    let company_key = get_company_key(company);
+    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert_with(|| CompanySummary {
+        company: company_key.to_string(),
+        assets: HashMap::new(),
+        total_usd_value: 0.0,
+    });
+
+    let entry = company_summary.assets.entry(symbol.to_string()).or_insert(AssetBalance {
+        symbol: symbol.to_string(),
+        total_amount: 0.0,
+        total_usd_value: 0.0,
+    });
+    entry.total_amount += amount;
+    if let Some(value) = usd_value {
+        entry.total_usd_value += value;
+        company_summary.total_usd_value += value;
+        portfolio.total_usd_value += value;
+    }
+}
+
 // Struct to hold wallet + balances during query phase
 enum WalletBalances {
     Solana(WalletAddress, solana::AccountBalances),
@@ -51,6 +88,8 @@ enum WalletBalances {
     Aptos(WalletAddress, aptos::AccountBalances),
     Sui(WalletAddress, sui::AccountBalances),
     Starknet(WalletAddress, starknet::AccountBalances),
+    Mercury(BankingAccount, mercury::AccountBalances),
+    Circle(BankingAccount, circle::AccountBalances),
 }
 
 #[tokio::main]
@@ -61,17 +100,29 @@ async fn main() -> Result<()> {
         Commands::Add { company, name, address, chain } => {
             add_address(company, name, address, chain)?;
         }
-        Commands::List => {
-            list_addresses()?;
+        Commands::AddBank { company, name, account_id, service } => {
+            add_banking_account(company, name, account_id, service)?;
+        }
+        Commands::List { company } => {
+            list_addresses(company)?;
         }
         Commands::Remove { identifier } => {
             remove_address(identifier)?;
         }
-        Commands::Query { rpc_url } => {
-            query_all(rpc_url).await?;
+        Commands::Query { rpc_url, no_prices } => {
+            query_all(rpc_url, no_prices).await?;
         }
-        Commands::QueryOne { name, rpc_url } => {
-            query_one(name, rpc_url).await?;
+        Commands::QueryOne { name, rpc_url, no_prices } => {
+            query_one(name, rpc_url, no_prices).await?;
+        }
+        Commands::ListMercuryAccounts => {
+            list_mercury_accounts().await?;
+        }
+        Commands::SetupMercury { company } => {
+            setup_mercury(company).await?;
+        }
+        Commands::ExportTransactions { name, format, start, end, output } => {
+            export_transactions(name, format, start, end, output).await?;
         }
     }
 
@@ -87,41 +138,90 @@ fn add_address(company: String, name: String, address: String, chain: Option<Str
     Ok(())
 }
 
-fn list_addresses() -> Result<()> {
+fn add_banking_account(company: String, name: String, account_id: String, service: String) -> Result<()> {
+    let mut book = AddressBook::load()?;
+    book.add_banking_account(company, name.clone(), account_id.clone(), service)?;
+    book.save()?;
+
+    ui::render_success(&format!("Added banking account '{}': {}", name, account_id));
+    Ok(())
+}
+
+fn list_addresses(company_filter: Option<String>) -> Result<()> {
     let book = AddressBook::load()?;
-    ui::render_addresses(&book.addresses);
+
+    let (addresses, banking_accounts) = match company_filter {
+        Some(ref filter) => {
+            let filter_lower = filter.to_lowercase();
+            let filtered_addresses: Vec<_> = book
+                .addresses
+                .iter()
+                .filter(|a| a.company.to_lowercase().contains(&filter_lower))
+                .cloned()
+                .collect();
+            let filtered_banking: Vec<_> = book
+                .banking_accounts
+                .iter()
+                .filter(|a| a.company.to_lowercase().contains(&filter_lower))
+                .cloned()
+                .collect();
+            (filtered_addresses, filtered_banking)
+        }
+        None => (book.addresses.clone(), book.banking_accounts.clone()),
+    };
+
+    ui::render_addresses(&addresses, &banking_accounts);
     Ok(())
 }
 
 fn remove_address(identifier: String) -> Result<()> {
     let mut book = AddressBook::load()?;
-    book.remove_by_identifier(&identifier)?;
-    book.save()?;
 
-    ui::render_success(&format!("Removed address '{}'", identifier));
+    // Try removing from addresses first
+    let removed_crypto = book.remove_by_identifier(&identifier).is_ok();
+
+    // If not found in addresses, try banking accounts
+    let removed_bank = if !removed_crypto {
+        book.remove_banking_account_by_identifier(&identifier).is_ok()
+    } else {
+        false
+    };
+
+    if !removed_crypto && !removed_bank {
+        anyhow::bail!("Address or account with name '{}' not found", identifier);
+    }
+
+    book.save()?;
+    ui::render_success(&format!("Removed '{}'", identifier));
     Ok(())
 }
 
-async fn query_all(rpc_url: Option<String>) -> Result<()> {
+async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
     let book = AddressBook::load()?;
 
-    if book.addresses.is_empty() {
-        println!("No addresses tracked yet. Use 'gringotts add' to add addresses.");
+    if book.addresses.is_empty() && book.banking_accounts.is_empty() {
+        println!("No addresses or accounts tracked yet.");
+        println!("Use 'gringotts add' to add blockchain addresses.");
+        println!("Use 'gringotts add-bank' to add banking accounts.");
         return Ok(());
     }
 
-    println!("\nQuerying balances for all tracked addresses...\n");
+    if no_prices {
+        println!("\nQuerying balances for all tracked addresses and accounts (without prices)...\n");
+    } else {
+        println!("\nQuerying balances for all tracked addresses and accounts...\n");
+    }
 
     // Phase 1: Query all balances (without prices)
-    let total_wallets = book.addresses.len();
-    let pb = ProgressBar::new(total_wallets as u64);
+    let total_items = book.addresses.len() + book.banking_accounts.len();
+    let pb = ProgressBar::new(total_items as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} wallets ({eta})")
-            .unwrap()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} items ({eta})")
+            .expect("valid progress bar template")
             .progress_chars("#>-")
     );
-    pb.set_message("Fetching wallet balances...");
+    pb.set_message("Fetching balances...");
 
     let mut all_balances: Vec<WalletBalances> = Vec::new();
 
@@ -185,13 +285,17 @@ async fn query_all(rpc_url: Option<String>) -> Result<()> {
             // All EVM chains
             Chain::Ethereum | Chain::Polygon | Chain::BinanceSmartChain | Chain::Arbitrum
             | Chain::Optimism | Chain::Avalanche | Chain::Base | Chain::Core => {
-                let client = EvmClient::new(rpc_url.clone(), wallet.chain.clone());
-                match client.get_balances(&wallet.address).await {
-                    Ok(balances) => {
-                        all_balances.push(WalletBalances::Evm(wallet.clone(), balances));
-                    }
+                match EvmClient::new(rpc_url.clone(), wallet.chain.clone()) {
+                    Ok(client) => match client.get_balances(&wallet.address).await {
+                        Ok(balances) => {
+                            all_balances.push(WalletBalances::Evm(wallet.clone(), balances));
+                        }
+                        Err(e) => {
+                            pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        }
+                    },
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        pb.println(format!("⚠ Warning: Failed to create EVM client for {} ({}): {}", wallet.name, wallet.address, e));
                     }
                 }
             }
@@ -199,70 +303,121 @@ async fn query_all(rpc_url: Option<String>) -> Result<()> {
         pb.inc(1);
     }
 
-    pb.finish_with_message(format!("✓ Successfully fetched balances from {} wallets", all_balances.len()));
-    println!();
-
-    // Phase 2: Extract all unique token symbols
-    let mut symbols: HashSet<String> = HashSet::new();
-    for wallet_balance in &all_balances {
-        match wallet_balance {
-            WalletBalances::Solana(_, balances) => {
-                symbols.insert("SOL".to_string());
-                for token in &balances.token_balances {
-                    if let Some(symbol) = &token.symbol {
-                        symbols.insert(symbol.clone());
+    // Query banking accounts
+    for account in book.banking_accounts.iter() {
+        match &account.service {
+            BankingService::Mercury => {
+                match MercuryClient::new() {
+                    Ok(client) => {
+                        match client.get_account_balance(&account.account_id).await {
+                            Ok(balances) => {
+                                all_balances.push(WalletBalances::Mercury(account.clone(), balances));
+                            }
+                            Err(e) => {
+                                pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", account.name, account.account_id, e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        pb.println(format!("⚠ Warning: Failed to initialize Mercury client: {}", e));
                     }
                 }
             }
-            WalletBalances::Evm(_, balances) => {
-                symbols.insert("ETH".to_string());
-                for token in &balances.token_balances {
-                    if let Some(symbol) = &token.symbol {
-                        symbols.insert(symbol.clone());
+            BankingService::Circle => {
+                match CircleClient::new() {
+                    Ok(client) => {
+                        match client.get_balances().await {
+                            Ok(balances) => {
+                                all_balances.push(WalletBalances::Circle(account.clone(), balances));
+                            }
+                            Err(e) => {
+                                pb.println(format!("⚠ Warning: Failed to query {} Circle balances: {}", account.name, e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        pb.println(format!("⚠ Warning: Failed to initialize Circle client: {}", e));
                     }
                 }
-            }
-            WalletBalances::Near(_, _) => {
-                symbols.insert("NEAR".to_string());
-            }
-            WalletBalances::Aptos(_, _) => {
-                symbols.insert("APT".to_string());
-            }
-            WalletBalances::Sui(_, _) => {
-                symbols.insert("SUI".to_string());
-            }
-            WalletBalances::Starknet(_, _) => {
-                symbols.insert("ETH".to_string());
             }
         }
+        pb.inc(1);
     }
 
-    // Phase 3: Batch fetch prices for all symbols
-    let price_service = PriceService::new();
+    pb.finish_with_message(format!("✓ Successfully fetched balances from {} items", all_balances.len()));
+    println!();
+
+    // Phase 2 & 3: Extract symbols and fetch prices (skip if --no-prices)
     let mut price_cache: HashMap<String, f64> = HashMap::new();
 
-    if !symbols.is_empty() {
-        let price_pb = ProgressBar::new_spinner();
-        price_pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap()
-        );
-        price_pb.set_message(format!("Fetching USD prices for {} unique tokens...", symbols.len()));
-        price_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        let symbols_vec: Vec<String> = symbols.into_iter().collect();
-        match price_service.batch_fetch_prices(&symbols_vec).await {
-            Ok(prices) => {
-                price_cache = prices;
-                price_pb.finish_with_message(format!("✓ Successfully fetched prices for {} symbols", price_cache.len()));
-            }
-            Err(e) => {
-                price_pb.finish_with_message(format!("⚠ Failed to fetch prices: {}", e));
-                price_pb.println("Balances will be displayed without USD values.");
+    if !no_prices {
+        // Phase 2: Extract all unique token symbols
+        let mut symbols: HashSet<String> = HashSet::new();
+        for wallet_balance in &all_balances {
+            match wallet_balance {
+                WalletBalances::Solana(_, balances) => {
+                    symbols.insert("SOL".to_string());
+                    for token in &balances.token_balances {
+                        if let Some(symbol) = &token.symbol {
+                            symbols.insert(symbol.clone());
+                        }
+                    }
+                }
+                WalletBalances::Evm(_, balances) => {
+                    symbols.insert("ETH".to_string());
+                    for token in &balances.token_balances {
+                        if let Some(symbol) = &token.symbol {
+                            symbols.insert(symbol.clone());
+                        }
+                    }
+                }
+                WalletBalances::Near(_, _) => {
+                    symbols.insert("NEAR".to_string());
+                }
+                WalletBalances::Aptos(_, _) => {
+                    symbols.insert("APT".to_string());
+                }
+                WalletBalances::Sui(_, _) => {
+                    symbols.insert("SUI".to_string());
+                }
+                WalletBalances::Starknet(_, _) => {
+                    symbols.insert("ETH".to_string());
+                }
+                WalletBalances::Mercury(_, _) => {
+                    // Mercury balances are already in USD, no price lookup needed
+                }
+                WalletBalances::Circle(_, _) => {
+                    // Circle balances are already in USD/EUR, no price lookup needed
+                }
             }
         }
-        println!();
+
+        // Phase 3: Batch fetch prices for all symbols
+        let price_service = PriceService::new()?;
+
+        if !symbols.is_empty() {
+            let price_pb = ProgressBar::new_spinner();
+            price_pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg}")
+                    .expect("valid spinner template")
+            );
+            price_pb.set_message(format!("Fetching USD prices for {} unique tokens...", symbols.len()));
+            price_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+            let symbols_vec: Vec<String> = symbols.into_iter().collect();
+            match price_service.batch_fetch_prices(&symbols_vec).await {
+                Ok(prices) => {
+                    price_cache = prices;
+                    price_pb.finish_with_message(format!("✓ Successfully fetched prices for {} symbols", price_cache.len()));
+                }
+                Err(e) => {
+                    price_pb.finish_with_message(format!("⚠ Failed to fetch prices: {}", e));
+                    price_pb.println("Balances will be displayed without USD values.");
+                }
+            }
+            println!();
+        }
     }
 
     // Phase 4: Enrich balances with cached prices and display
@@ -303,6 +458,14 @@ async fn query_all(rpc_url: Option<String>) -> Result<()> {
                 ui::render_starknet_balances(&wallet.company, &wallet.name, &wallet.address, &balances, &wallet.chain);
                 aggregate_starknet_balances(&mut portfolio, &wallet.company, &balances);
             }
+            WalletBalances::Mercury(account, balances) => {
+                ui::render_mercury_balances(&account.company, &account.name, &account.account_id, &balances, &account.service);
+                aggregate_mercury_balances(&mut portfolio, &account.company, &balances);
+            }
+            WalletBalances::Circle(account, balances) => {
+                ui::render_circle_balances(&account.company, &account.name, &balances, &account.service);
+                aggregate_circle_balances(&mut portfolio, &account.company, &balances);
+            }
         }
     }
 
@@ -312,38 +475,54 @@ async fn query_all(rpc_url: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn query_one(name: String, rpc_url: Option<String>) -> Result<()> {
+async fn query_one(name: String, rpc_url: Option<String>, no_prices: bool) -> Result<()> {
     let book = AddressBook::load()?;
 
-    let wallet = book
-        .addresses
-        .iter()
-        .find(|a| a.name == name)
-        .ok_or_else(|| anyhow::anyhow!("Address '{}' not found", name))?;
+    // Try to find in crypto addresses first
+    if let Some(wallet) = book.addresses.iter().find(|a| a.name == name) {
+        query_crypto_address(wallet, rpc_url, no_prices).await?;
+        return Ok(());
+    }
 
-    println!("\nQuerying balance for '{}'...\n", name);
+    // Try to find in banking accounts
+    if let Some(account) = book.banking_accounts.iter().find(|a| a.name == name) {
+        query_banking_account(account).await?;
+        return Ok(());
+    }
+
+    anyhow::bail!("Address or account '{}' not found", name)
+}
+
+async fn query_crypto_address(wallet: &WalletAddress, rpc_url: Option<String>, no_prices: bool) -> Result<()> {
+    if no_prices {
+        println!("\nQuerying balance for '{}' (without prices)...\n", wallet.name);
+    } else {
+        println!("\nQuerying balance for '{}'...\n", wallet.name);
+    }
 
     // Create price service and cache
-    let price_service = PriceService::new();
+    let price_service = PriceService::new()?;
     let mut price_cache: HashMap<String, f64> = HashMap::new();
 
-    // Batch fetch all known prices in a single API call
-    println!("Fetching cryptocurrency prices...");
-    match price_service.batch_fetch_all_known_prices().await {
-        Ok(prices) => {
-            price_cache = prices;
-            println!("Successfully fetched prices\n");
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to batch fetch prices: {}", e);
-            eprintln!("Will attempt to fetch prices individually as needed.\n");
+    // Batch fetch all known prices in a single API call (skip if --no-prices)
+    if !no_prices {
+        println!("Fetching cryptocurrency prices...");
+        match price_service.batch_fetch_all_known_prices().await {
+            Ok(prices) => {
+                price_cache = prices;
+                println!("Successfully fetched prices\n");
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to batch fetch prices: {}", e);
+                eprintln!("Will attempt to fetch prices individually as needed.\n");
+            }
         }
     }
 
     match &wallet.chain {
         Chain::Solana => {
             let client = SolanaClient::new(rpc_url);
-            query_and_display_solana(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache).await?;
+            query_and_display_solana(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache, no_prices).await?;
         }
         Chain::Near => {
             let client = NearClient::new(rpc_url);
@@ -364,8 +543,8 @@ async fn query_one(name: String, rpc_url: Option<String>) -> Result<()> {
         // All EVM chains
         Chain::Ethereum | Chain::Polygon | Chain::BinanceSmartChain | Chain::Arbitrum
         | Chain::Optimism | Chain::Avalanche | Chain::Base | Chain::Core => {
-            let client = EvmClient::new(rpc_url, wallet.chain.clone());
-            query_and_display_evm(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache).await?;
+            let client = EvmClient::new(rpc_url, wallet.chain.clone())?;
+            query_and_display_evm(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache, no_prices).await?;
         }
     }
 
@@ -495,13 +674,16 @@ async fn query_and_display_solana(
     address: &str,
     chain: &Chain,
     price_service: &PriceService,
-    price_cache: &mut HashMap<String, f64>
+    price_cache: &mut HashMap<String, f64>,
+    no_prices: bool,
 ) -> Result<solana::AccountBalances> {
     match client.get_balances(address) {
         Ok(mut balances) => {
-            // Try to enrich with USD prices using cache
-            if let Err(e) = enrich_with_usd_prices(&mut balances, price_service, price_cache).await {
-                eprintln!("Warning: Failed to fetch USD prices: {}", e);
+            // Try to enrich with USD prices using cache (skip if --no-prices)
+            if !no_prices {
+                if let Err(e) = enrich_with_usd_prices(&mut balances, price_service, price_cache).await {
+                    eprintln!("Warning: Failed to fetch USD prices: {}", e);
+                }
             }
 
             // Use the new UI renderer
@@ -522,13 +704,16 @@ async fn query_and_display_evm(
     address: &str,
     chain: &Chain,
     price_service: &PriceService,
-    price_cache: &mut HashMap<String, f64>
+    price_cache: &mut HashMap<String, f64>,
+    no_prices: bool,
 ) -> Result<evm::AccountBalances> {
     match client.get_balances(address).await {
         Ok(mut balances) => {
-            // Try to enrich with USD prices using cache
-            if let Err(e) = enrich_with_eth_prices(&mut balances, price_service, price_cache).await {
-                eprintln!("Warning: Failed to fetch USD prices: {}", e);
+            // Try to enrich with USD prices using cache (skip if --no-prices)
+            if !no_prices {
+                if let Err(e) = enrich_with_eth_prices(&mut balances, price_service, price_cache).await {
+                    eprintln!("Warning: Failed to fetch USD prices: {}", e);
+                }
             }
 
             // Use the new UI renderer
@@ -543,81 +728,21 @@ async fn query_and_display_evm(
 }
 
 fn aggregate_solana_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &solana::AccountBalances) {
-    let company_key = if company.is_empty() { "Uncategorized" } else { company };
+    add_asset_to_portfolio(portfolio, company, "SOL", balances.sol_balance, balances.sol_usd_value);
 
-    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert(CompanySummary {
-        company: company_key.to_string(),
-        assets: HashMap::new(),
-        total_usd_value: 0.0,
-    });
-
-    // Add SOL balance
-    let sol_entry = company_summary.assets.entry("SOL".to_string()).or_insert(AssetBalance {
-        symbol: "SOL".to_string(),
-        total_amount: 0.0,
-        total_usd_value: 0.0,
-    });
-    sol_entry.total_amount += balances.sol_balance;
-    if let Some(usd_value) = balances.sol_usd_value {
-        sol_entry.total_usd_value += usd_value;
-        company_summary.total_usd_value += usd_value;
-        portfolio.total_usd_value += usd_value;
-    }
-
-    // Add SPL token balances
     for token in &balances.token_balances {
         let symbol = token.symbol.as_deref().unwrap_or("Unknown");
-        let entry = company_summary.assets.entry(symbol.to_string()).or_insert(AssetBalance {
-            symbol: symbol.to_string(),
-            total_amount: 0.0,
-            total_usd_value: 0.0,
-        });
-        entry.total_amount += token.ui_amount;
-        if let Some(usd_value) = token.usd_value {
-            entry.total_usd_value += usd_value;
-            company_summary.total_usd_value += usd_value;
-            portfolio.total_usd_value += usd_value;
-        }
+        add_asset_to_portfolio(portfolio, company, symbol, token.ui_amount, token.usd_value);
     }
 }
 
 fn aggregate_evm_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &evm::AccountBalances, chain: &Chain) {
-    let company_key = if company.is_empty() { "Uncategorized" } else { company };
-
-    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert(CompanySummary {
-        company: company_key.to_string(),
-        assets: HashMap::new(),
-        total_usd_value: 0.0,
-    });
-
-    // Add native token balance (ETH, CORE, MATIC, BNB, AVAX, etc.)
     let native_symbol = chain.native_token_symbol();
-    let native_entry = company_summary.assets.entry(native_symbol.to_string()).or_insert(AssetBalance {
-        symbol: native_symbol.to_string(),
-        total_amount: 0.0,
-        total_usd_value: 0.0,
-    });
-    native_entry.total_amount += balances.eth_balance;
-    if let Some(usd_value) = balances.eth_usd_value {
-        native_entry.total_usd_value += usd_value;
-        company_summary.total_usd_value += usd_value;
-        portfolio.total_usd_value += usd_value;
-    }
+    add_asset_to_portfolio(portfolio, company, native_symbol, balances.eth_balance, balances.eth_usd_value);
 
-    // Add ERC20 token balances
     for token in &balances.token_balances {
         let symbol = token.symbol.as_deref().unwrap_or("Unknown");
-        let entry = company_summary.assets.entry(symbol.to_string()).or_insert(AssetBalance {
-            symbol: symbol.to_string(),
-            total_amount: 0.0,
-            total_usd_value: 0.0,
-        });
-        entry.total_amount += token.ui_amount;
-        if let Some(usd_value) = token.usd_value {
-            entry.total_usd_value += usd_value;
-            company_summary.total_usd_value += usd_value;
-            portfolio.total_usd_value += usd_value;
-        }
+        add_asset_to_portfolio(portfolio, company, symbol, token.ui_amount, token.usd_value);
     }
 }
 
@@ -643,25 +768,7 @@ async fn query_and_display_near(
 }
 
 fn aggregate_near_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &near::AccountBalances) {
-    let company_key = if company.is_empty() { "Uncategorized" } else { company };
-
-    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert(CompanySummary {
-        company: company_key.to_string(),
-        assets: HashMap::new(),
-        total_usd_value: 0.0,
-    });
-
-    let near_entry = company_summary.assets.entry("NEAR".to_string()).or_insert(AssetBalance {
-        symbol: "NEAR".to_string(),
-        total_amount: 0.0,
-        total_usd_value: 0.0,
-    });
-    near_entry.total_amount += balances.near_balance;
-    if let Some(usd_value) = balances.near_usd_value {
-        near_entry.total_usd_value += usd_value;
-        company_summary.total_usd_value += usd_value;
-        portfolio.total_usd_value += usd_value;
-    }
+    add_asset_to_portfolio(portfolio, company, "NEAR", balances.near_balance, balances.near_usd_value);
 }
 
 async fn query_and_display_aptos(
@@ -686,25 +793,7 @@ async fn query_and_display_aptos(
 }
 
 fn aggregate_aptos_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &aptos::AccountBalances) {
-    let company_key = if company.is_empty() { "Uncategorized" } else { company };
-
-    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert(CompanySummary {
-        company: company_key.to_string(),
-        assets: HashMap::new(),
-        total_usd_value: 0.0,
-    });
-
-    let apt_entry = company_summary.assets.entry("APT".to_string()).or_insert(AssetBalance {
-        symbol: "APT".to_string(),
-        total_amount: 0.0,
-        total_usd_value: 0.0,
-    });
-    apt_entry.total_amount += balances.apt_balance;
-    if let Some(usd_value) = balances.apt_usd_value {
-        apt_entry.total_usd_value += usd_value;
-        company_summary.total_usd_value += usd_value;
-        portfolio.total_usd_value += usd_value;
-    }
+    add_asset_to_portfolio(portfolio, company, "APT", balances.apt_balance, balances.apt_usd_value);
 }
 
 async fn query_and_display_sui(
@@ -729,25 +818,7 @@ async fn query_and_display_sui(
 }
 
 fn aggregate_sui_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &sui::AccountBalances) {
-    let company_key = if company.is_empty() { "Uncategorized" } else { company };
-
-    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert(CompanySummary {
-        company: company_key.to_string(),
-        assets: HashMap::new(),
-        total_usd_value: 0.0,
-    });
-
-    let sui_entry = company_summary.assets.entry("SUI".to_string()).or_insert(AssetBalance {
-        symbol: "SUI".to_string(),
-        total_amount: 0.0,
-        total_usd_value: 0.0,
-    });
-    sui_entry.total_amount += balances.sui_balance;
-    if let Some(usd_value) = balances.sui_usd_value {
-        sui_entry.total_usd_value += usd_value;
-        company_summary.total_usd_value += usd_value;
-        portfolio.total_usd_value += usd_value;
-    }
+    add_asset_to_portfolio(portfolio, company, "SUI", balances.sui_balance, balances.sui_usd_value);
 }
 
 async fn query_and_display_starknet(
@@ -772,25 +843,7 @@ async fn query_and_display_starknet(
 }
 
 fn aggregate_starknet_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &starknet::AccountBalances) {
-    let company_key = if company.is_empty() { "Uncategorized" } else { company };
-
-    let company_summary = portfolio.companies.entry(company_key.to_string()).or_insert(CompanySummary {
-        company: company_key.to_string(),
-        assets: HashMap::new(),
-        total_usd_value: 0.0,
-    });
-
-    let eth_entry = company_summary.assets.entry("ETH".to_string()).or_insert(AssetBalance {
-        symbol: "ETH".to_string(),
-        total_amount: 0.0,
-        total_usd_value: 0.0,
-    });
-    eth_entry.total_amount += balances.eth_balance;
-    if let Some(usd_value) = balances.eth_usd_value {
-        eth_entry.total_usd_value += usd_value;
-        company_summary.total_usd_value += usd_value;
-        portfolio.total_usd_value += usd_value;
-    }
+    add_asset_to_portfolio(portfolio, company, "ETH", balances.eth_balance, balances.eth_usd_value);
 }
 
 // Cache-only enrich functions (no API calls, only use cached prices)
@@ -874,4 +927,298 @@ fn enrich_starknet_from_cache(balances: &mut starknet::AccountBalances, price_ca
         balances.eth_usd_value = Some(balances.eth_balance * price);
         balances.total_usd_value = Some(balances.eth_balance * price);
     }
+}
+
+fn aggregate_mercury_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &mercury::AccountBalances) {
+    add_asset_to_portfolio(portfolio, company, "USD", balances.current_balance, Some(balances.current_balance));
+}
+
+fn aggregate_circle_balances(portfolio: &mut PortfolioSummary, company: &str, balances: &circle::AccountBalances) {
+    for balance in &balances.available_balances {
+        let symbol = match balance.currency.as_str() {
+            "USD" => "USDC",
+            "EUR" => "EURC",
+            _ => &balance.currency,
+        };
+        // Only USD has a known USD value; EUR would need conversion
+        let usd_value = if balance.currency == "USD" { Some(balance.amount) } else { None };
+        add_asset_to_portfolio(portfolio, company, symbol, balance.amount, usd_value);
+    }
+}
+
+async fn query_banking_account(account: &BankingAccount) -> Result<()> {
+    println!("\nQuerying balance for '{}'...\n", account.name);
+
+    match &account.service {
+        BankingService::Mercury => {
+            let client = MercuryClient::new()?;
+            match client.get_account_balance(&account.account_id).await {
+                Ok(balances) => {
+                    ui::render_mercury_balances(&account.company, &account.name, &account.account_id, &balances, &account.service);
+                    Ok(())
+                }
+                Err(e) => {
+                    ui::render_error(&format!("Error querying '{}' ({}): {}", account.name, account.account_id, e));
+                    anyhow::bail!("Failed to query Mercury account")
+                }
+            }
+        }
+        BankingService::Circle => {
+            let client = CircleClient::new()?;
+            match client.get_balances().await {
+                Ok(balances) => {
+                    ui::render_circle_balances(&account.company, &account.name, &balances, &account.service);
+                    Ok(())
+                }
+                Err(e) => {
+                    ui::render_error(&format!("Error querying '{}' Circle balances: {}", account.name, e));
+                    anyhow::bail!("Failed to query Circle account")
+                }
+            }
+        }
+    }
+}
+
+async fn export_transactions(
+    name: String,
+    format: String,
+    start: Option<String>,
+    end: Option<String>,
+    output: Option<String>,
+) -> Result<()> {
+    let book = AddressBook::load()?;
+
+    // Find the Mercury account
+    let account = book
+        .banking_accounts
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Banking account '{}' not found", name))?;
+
+    if !matches!(account.service, BankingService::Mercury) {
+        anyhow::bail!("Transaction export is only supported for Mercury accounts");
+    }
+
+    // Validate date format (YYYY-MM-DD)
+    let date_regex = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
+    if let Some(ref s) = start {
+        if !date_regex.is_match(s) {
+            anyhow::bail!("Invalid start date format '{}'. Use YYYY-MM-DD.", s);
+        }
+    }
+    if let Some(ref e) = end {
+        if !date_regex.is_match(e) {
+            anyhow::bail!("Invalid end date format '{}'. Use YYYY-MM-DD.", e);
+        }
+    }
+
+    let client = MercuryClient::new()?;
+
+    eprintln!("Fetching transactions for '{}'...", name);
+
+    let transactions = client
+        .get_transactions(
+            &account.account_id,
+            start.as_deref(),
+            end.as_deref(),
+        )
+        .await?;
+
+    eprintln!("Found {} transactions", transactions.len());
+
+    let output_data = match format.to_lowercase().as_str() {
+        "json" => {
+            serde_json::to_string_pretty(&transactions)?
+        }
+        "csv" | _ => {
+            let mut csv_output = String::new();
+            csv_output.push_str("date,amount,status,counterparty,description,note,kind\n");
+
+            for tx in &transactions {
+                let raw_date = tx.posted_at.as_deref().unwrap_or(&tx.created_at);
+                // Convert ISO date to DD-MM-YYYY
+                let date = if raw_date.len() >= 10 {
+                    let parts: Vec<&str> = raw_date[..10].split('-').collect();
+                    if parts.len() == 3 {
+                        format!("{}-{}-{}", parts[2], parts[1], parts[0])
+                    } else {
+                        raw_date.to_string()
+                    }
+                } else {
+                    raw_date.to_string()
+                };
+                let counterparty = tx.counterparty_name.as_deref().unwrap_or("");
+                let description = tx.bank_description.as_deref().unwrap_or("");
+                let note = tx.note.as_deref().unwrap_or("");
+
+                // Escape CSV fields
+                let escape_csv = |s: &str| {
+                    if s.contains(',') || s.contains('"') || s.contains('\n') {
+                        format!("\"{}\"", s.replace('"', "\"\""))
+                    } else {
+                        s.to_string()
+                    }
+                };
+
+                csv_output.push_str(&format!(
+                    "{},{},{},{},{},{},{}\n",
+                    date,
+                    tx.amount,
+                    tx.status,
+                    escape_csv(counterparty),
+                    escape_csv(description),
+                    escape_csv(note),
+                    tx.kind
+                ));
+            }
+            csv_output
+        }
+    };
+
+    match output {
+        Some(path) => {
+            let mut file = std::fs::File::create(&path)?;
+            file.write_all(output_data.as_bytes())?;
+            eprintln!("Exported to {}", path);
+        }
+        None => {
+            print!("{}", output_data);
+        }
+    }
+
+    Ok(())
+}
+
+async fn list_mercury_accounts() -> Result<()> {
+    let client = MercuryClient::new()?;
+    let accounts = client.list_accounts().await?;
+
+    println!("\nMercury Accounts\n");
+    println!("{:<40} {:<20} {:<10} {:<15} {:<15}", "ID", "Name", "Status", "Kind", "Balance");
+    println!("{}", "-".repeat(100));
+
+    for account in &accounts {
+        println!(
+            "{:<40} {:<20} {:<10} {:<15} ${:<14.2}",
+            account.id,
+            if account.name.len() > 18 {
+                format!("{}...", &account.name[..15])
+            } else {
+                account.name.clone()
+            },
+            account.status,
+            account.kind,
+            account.current_balance
+        );
+    }
+
+    println!("\nTotal: {} account(s)", accounts.len());
+    Ok(())
+}
+
+async fn setup_mercury(company: String) -> Result<()> {
+    let client = MercuryClient::new()?;
+    let accounts = client.list_accounts().await?;
+
+    if accounts.is_empty() {
+        println!("No Mercury accounts found.");
+        return Ok(());
+    }
+
+    println!("\nFound {} Mercury account(s):\n", accounts.len());
+
+    for (i, account) in accounts.iter().enumerate() {
+        println!(
+            "  [{}] {} ({}) - ${:.2} - {}",
+            i + 1,
+            account.name,
+            account.kind,
+            account.current_balance,
+            account.status
+        );
+    }
+
+    println!("\nOptions:");
+    println!("  [A] Add all accounts");
+    println!("  [S] Select specific accounts (e.g., 1,3,5)");
+    println!("  [N] Add none");
+    print!("\nChoice: ");
+    io::stdout().flush()?;
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    stdin.lock().read_line(&mut input)?;
+    let choice = input.trim().to_uppercase();
+
+    let selected_indices: Vec<usize> = match choice.as_str() {
+        "A" => (0..accounts.len()).collect(),
+        "N" => {
+            println!("No accounts added.");
+            return Ok(());
+        }
+        "S" => {
+            print!("Enter account numbers (comma-separated, e.g., 1,3): ");
+            io::stdout().flush()?;
+            input.clear();
+            stdin.lock().read_line(&mut input)?;
+
+            input
+                .trim()
+                .split(',')
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .filter(|&n| n >= 1 && n <= accounts.len())
+                .map(|n| n - 1)
+                .collect()
+        }
+        _ => {
+            // Try parsing as comma-separated numbers directly
+            choice
+                .split(',')
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .filter(|&n| n >= 1 && n <= accounts.len())
+                .map(|n| n - 1)
+                .collect()
+        }
+    };
+
+    if selected_indices.is_empty() {
+        println!("No valid accounts selected.");
+        return Ok(());
+    }
+
+    let mut book = AddressBook::load()?;
+    let mut added = 0;
+
+    for idx in selected_indices {
+        let account = &accounts[idx];
+
+        // Create a friendly name from the Mercury account name
+        let name = account.name.clone();
+
+        // Check if already tracked
+        if book.banking_accounts.iter().any(|a| a.account_id == account.id) {
+            println!("  Skipping '{}' - already tracked", name);
+            continue;
+        }
+
+        book.add_banking_account(
+            company.clone(),
+            name.clone(),
+            account.id.clone(),
+            "mercury".to_string(),
+        )?;
+
+        println!("  Added '{}'", name);
+        added += 1;
+    }
+
+    book.save()?;
+
+    if added > 0 {
+        println!("\nSuccessfully added {} account(s) to tracking.", added);
+    } else {
+        println!("\nNo new accounts added.");
+    }
+
+    Ok(())
 }
