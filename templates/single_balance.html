@@ -1,0 +1,124 @@
+<div class="single-balance-card">
+    <div class="single-balance-header">
+        <div>
+            <h3>{{ name }}</h3>
+            <div class="balance-meta">
+                <span class="chain-badge">{{ chain }}</span>
+                <span class="address-display">{{ address }}</span>
+            </div>
+        </div>
+        <button class="btn btn-sm" onclick="this.closest('.single-balance-card').remove()">Close</button>
+    </div>
+
+    {% if !error.is_empty() %}
+    <div class="balance-error">{{ error }}</div>
+    {% else %}
+
+    <div class="balance-total">
+        <span class="total-value">${{ total_usd|format_usd }}</span>
+    </div>
+
+    <div class="balance-details">
+        <div class="native-balance">
+            <span class="token-symbol">{{ native_symbol }}</span>
+            <span class="token-amount">{{ native_balance|format_amount }}</span>
+            {% if native_usd > 0.0 %}
+            <span class="token-usd">${{ native_usd|format_usd }}</span>
+            {% endif %}
+        </div>
+
+        {% for token in tokens %}
+        <div class="token-balance">
+            <span class="token-symbol">{{ token.symbol }}</span>
+            <span class="token-amount">{{ token.balance|format_amount }}</span>
+            {% if token.usd_value > 0.0 %}
+            <span class="token-usd">${{ token.usd_value|format_usd }}</span>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    {% endif %}
+</div>
+
+<style>
+    .single-balance-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 1rem;
+        margin-top: 0.5rem;
+        animation: slideDown 0.2s ease;
+    }
+    @keyframes slideDown {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .single-balance-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1rem;
+    }
+    .single-balance-header h3 {
+        margin: 0 0 0.25rem 0;
+        font-size: 1rem;
+    }
+    .balance-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.75rem;
+    }
+    .address-display {
+        color: var(--text-muted);
+        font-family: 'SF Mono', Monaco, monospace;
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .balance-total {
+        text-align: center;
+        padding: 0.75rem;
+        background: var(--bg);
+        border-radius: 6px;
+        margin-bottom: 1rem;
+    }
+    .balance-total .total-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--success);
+        font-family: 'SF Mono', Monaco, monospace;
+    }
+    .balance-details {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .native-balance, .token-balance {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.5rem;
+        background: var(--bg);
+        border-radius: 4px;
+    }
+    .token-symbol {
+        font-weight: 600;
+        min-width: 60px;
+    }
+    .token-amount {
+        font-family: 'SF Mono', Monaco, monospace;
+        color: var(--text-muted);
+        flex: 1;
+    }
+    .token-usd {
+        font-family: 'SF Mono', Monaco, monospace;
+        color: var(--success);
+    }
+    .balance-error {
+        color: var(--danger);
+        padding: 1rem;
+        text-align: center;
+    }
+</style>

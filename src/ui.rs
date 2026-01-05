@@ -75,11 +75,11 @@ pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[Banking
         // Distribute extra space proportionally
         let extra = available_width - min_total;
         // Give more space to Name and Address columns
-        let company_w = min_company + (extra * 1) / 10;
+        let company_w = min_company + extra / 10;
         let name_w = min_name + (extra * 3) / 10;
         let address_w = min_address + (extra * 4) / 10;
-        let type_w = min_type + (extra * 1) / 10;
-        let chain_w = min_chain + (extra * 1) / 10;
+        let type_w = min_type + extra / 10;
+        let chain_w = min_chain + extra / 10;
         (company_w, name_w, address_w, type_w, chain_w)
     };
 
@@ -404,7 +404,7 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
     // Total Portfolio Value with proper padding
     let total_value_str = format!("Total Portfolio Value: ${}", format_usd(portfolio.total_usd_value));
     let total_value_len = total_value_str.len();
-    let total_padding = if total_value_len < BOX_WIDTH - 2 { BOX_WIDTH - 2 - total_value_len } else { 0 };
+    let total_padding = (BOX_WIDTH - 2).saturating_sub(total_value_len);
     println!("║  {}{:width$} ║", total_value_str, "", width = total_padding);
 
     if portfolio.companies.is_empty() {
@@ -418,13 +418,13 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
     let mut sorted_companies: Vec<_> = portfolio.companies.iter().collect();
     sorted_companies.sort_by(|a, b| b.1.total_usd_value.total_cmp(&a.1.total_usd_value));
 
-    for (_, company) in sorted_companies {
+    for (company_name, company) in sorted_companies {
         println!("╠═════════════════════════════════════════════════════════════════════════════════╣");
 
         // Company header
-        let company_header = format!("COMPANY: {}", company.company);
+        let company_header = format!("COMPANY: {}", company_name);
         let company_header_len = company_header.len();
-        let company_padding = if company_header_len < BOX_WIDTH - 2 { BOX_WIDTH - 2 - company_header_len } else { 0 };
+        let company_padding = (BOX_WIDTH - 2).saturating_sub(company_header_len);
         println!("║  {}{:width$} ║", company_header, "", width = company_padding);
 
         // Company total value
@@ -440,7 +440,11 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
         } else {
             // Sort assets by USD value (descending)
             let mut sorted_assets: Vec<_> = company.assets.iter().collect();
-            sorted_assets.sort_by(|a, b| b.1.total_usd_value.total_cmp(&a.1.total_usd_value));
+            sorted_assets.sort_by(|a, b| {
+                let a_val = a.1.usd_value.unwrap_or(0.0);
+                let b_val = b.1.usd_value.unwrap_or(0.0);
+                b_val.total_cmp(&a_val)
+            });
 
             for (_, asset) in sorted_assets {
                 // Symbol line
@@ -450,13 +454,14 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
                 println!("║      {}{:width$} ║", symbol_str, "", width = symbol_padding);
 
                 // Amount and USD Value on same line if USD value exists
-                if asset.total_usd_value > 0.0 {
-                    let detail_str = format!("{:.6} (${:})", asset.total_amount, format_usd(asset.total_usd_value));
+                let usd_value = asset.usd_value.unwrap_or(0.0);
+                if usd_value > 0.0 {
+                    let detail_str = format!("{:.6} (${:})", asset.amount, format_usd(usd_value));
                     let detail_len = detail_str.len();
                     let detail_padding = if detail_len + 8 < BOX_WIDTH - 2 { BOX_WIDTH - 2 - detail_len - 8 } else { 0 };
                     println!("║          {}{:width$} ║", detail_str, "", width = detail_padding);
                 } else {
-                    let amount_str = format!("{:.6}", asset.total_amount);
+                    let amount_str = format!("{:.6}", asset.amount);
                     let amount_len = amount_str.len();
                     let amount_padding = if amount_len + 8 < BOX_WIDTH - 2 { BOX_WIDTH - 2 - amount_len - 8 } else { 0 };
                     println!("║          {}{:width$} ║", amount_str, "", width = amount_padding);
@@ -468,6 +473,7 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
     println!("╚═════════════════════════════════════════════════════════════════════════════════╝\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_simple_balance(
     company: &str,
     name: &str,
@@ -639,8 +645,8 @@ pub fn render_circle_balances(company: &str, name: &str, balances: &circle::Acco
     println!("\n╔{}╗", "═".repeat(box_width + 2));
 
     // Print header lines
-    for i in 0..3 {
-        println!("║  {:<width$} ║", lines[i], width = box_width);
+    for line in lines.iter().take(3) {
+        println!("║  {:<width$} ║", line, width = box_width);
     }
 
     println!("╠{}╣", "═".repeat(box_width + 2));

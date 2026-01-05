@@ -1,0 +1,192 @@
+<div class="transactions-card">
+    <div class="transactions-header">
+        <div>
+            <h3>{{ name }}</h3>
+            <span class="account-type-badge">{{ account_type }}</span>
+        </div>
+        <button class="btn btn-sm" onclick="this.closest('.transactions-card').remove()">Close</button>
+    </div>
+
+    {% if transactions.is_empty() && !error.is_empty() %}
+    <div class="transactions-message">{{ error|safe }}</div>
+    {% else if transactions.is_empty() %}
+    <div class="transactions-message">No transactions found.</div>
+    {% else %}
+
+    {% if !error.is_empty() %}
+    <div class="transactions-note">{{ error|safe }}</div>
+    {% endif %}
+
+    <div class="transactions-table-wrapper">
+        <table class="transactions-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                    <th>Counterparty</th>
+                    <th style="text-align: right;">Amount</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for tx in transactions %}
+                <tr>
+                    <td class="date-cell">{{ tx.date }}</td>
+                    <td>
+                        <span class="tx-type {{ tx.tx_type }}">
+                            {% if tx.tx_type == "deposit" %}+{% else %}-{% endif %}
+                        </span>
+                    </td>
+                    <td class="description-cell">{{ tx.description }}</td>
+                    <td class="counterparty-cell">{{ tx.counterparty }}</td>
+                    <td class="amount-cell {% if tx.amount > 0.0 %}positive{% else if tx.amount < 0.0 %}negative{% endif %}">
+                        {% if tx.amount >= 0.0 %}+{% endif %}{% if tx.currency == "USD" %}${% endif %}{{ tx.amount|format_amount }} {% if tx.currency != "USD" %}{{ tx.currency }}{% endif %}
+                    </td>
+                    <td>
+                        <span class="status-badge {{ tx.status|lower }}">{{ tx.status }}</span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="transactions-footer">
+        Showing {{ transactions.len() }} most recent transactions
+    </div>
+
+    {% endif %}
+</div>
+
+<style>
+    .transactions-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 1rem;
+        margin-top: 0.5rem;
+        animation: slideDown 0.2s ease;
+    }
+    .transactions-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .transactions-header h3 {
+        margin: 0 0 0.25rem 0;
+        font-size: 1rem;
+    }
+    .account-type-badge {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+    }
+    .transactions-message {
+        padding: 2rem;
+        text-align: center;
+        color: var(--text-muted);
+    }
+    .transactions-message a {
+        color: var(--accent);
+        word-break: break-all;
+    }
+    .transactions-note {
+        padding: 0.5rem 1rem;
+        margin-bottom: 1rem;
+        background: rgba(88, 166, 255, 0.1);
+        border-left: 3px solid var(--accent);
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+    .transactions-note a {
+        color: var(--accent);
+    }
+    .transactions-table-wrapper {
+        overflow-x: auto;
+        max-height: 400px;
+        overflow-y: auto;
+    }
+    .transactions-table {
+        width: 100%;
+        font-size: 0.875rem;
+    }
+    .transactions-table th {
+        position: sticky;
+        top: 0;
+        background: var(--bg-secondary);
+        z-index: 1;
+    }
+    .transactions-table td, .transactions-table th {
+        padding: 0.5rem;
+        white-space: nowrap;
+    }
+    .date-cell {
+        font-family: 'SF Mono', Monaco, monospace;
+        color: var(--text-muted);
+    }
+    .tx-type {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        text-align: center;
+        line-height: 20px;
+        font-weight: bold;
+        font-size: 0.75rem;
+    }
+    .tx-type.deposit {
+        background: rgba(63, 185, 80, 0.2);
+        color: var(--success);
+    }
+    .tx-type.withdrawal {
+        background: rgba(248, 81, 73, 0.2);
+        color: var(--danger);
+    }
+    .description-cell {
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .counterparty-cell {
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--text-muted);
+    }
+    .amount-cell {
+        text-align: right;
+        font-family: 'SF Mono', Monaco, monospace;
+        font-weight: 600;
+    }
+    .amount-cell.positive { color: var(--success); }
+    .amount-cell.negative { color: var(--danger); }
+    .status-badge {
+        font-size: 0.7rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 999px;
+        text-transform: uppercase;
+    }
+    .status-badge.sent, .status-badge.pending {
+        background: rgba(210, 153, 34, 0.2);
+        color: var(--warning);
+    }
+    .status-badge.completed, .status-badge.posted {
+        background: rgba(63, 185, 80, 0.2);
+        color: var(--success);
+    }
+    .status-badge.failed, .status-badge.cancelled {
+        background: rgba(248, 81, 73, 0.2);
+        color: var(--danger);
+    }
+    .transactions-footer {
+        margin-top: 1rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        text-align: center;
+    }
+</style>

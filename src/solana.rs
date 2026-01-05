@@ -2,10 +2,30 @@ use anyhow::{Context, Result};
 use base64::prelude::*;
 use mpl_token_metadata::accounts::Metadata;
 use solana_account_decoder_client_types::UiAccountData;
-use solana_client::rpc_client::RpcClient;
+use solana_client::rpc_client::{RpcClient, GetConfirmedSignaturesForAddress2Config};
+use solana_client::rpc_config::RpcTransactionConfig;
+use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::program_pack::Pack;
+use solana_sdk::signature::Signature;
+use solana_transaction_status_client_types::UiTransactionEncoding;
+use std::env;
 use std::str::FromStr;
+use std::collections::HashMap;
+
+const HELIUS_RPC_TEMPLATE: &str = "https://mainnet.helius-rpc.com/?api-key={}";
+const SOLANA_PUBLIC_RPC: &str = "https://api.mainnet-beta.solana.com";
+
+fn get_default_rpc_url() -> Option<String> {
+    match env::var("HELIUS_API_KEY") {
+        Ok(api_key) => Some(HELIUS_RPC_TEMPLATE.replace("{}", &api_key).to_string()),
+        Err(_) => {
+            eprintln!("Warning: HELIUS_API_KEY not set. Using public Solana RPC.");
+            eprintln!("For better performance, get a Helius API key at https://helius.dev");
+            None
+        }
+    }
+}
 
 pub struct SolanaClient {
     client: RpcClient,
@@ -31,11 +51,21 @@ pub struct AccountBalances {
     pub total_usd_value: Option<f64>,
 }
 
+#[derive(Debug)]
+pub struct SolanaTransaction {
+    pub signature: String,
+    pub timestamp: Option<i64>,
+    pub slot: u64,
+    pub success: bool,
+    pub memo: Option<String>,
+    pub sol_change: f64, // SOL change (positive = received, negative = sent)
+}
+
 impl SolanaClient {
     pub fn new(rpc_url: Option<String>) -> Self {
-        let url = rpc_url.unwrap_or_else(|| {
-            "https://api.mainnet-beta.solana.com".to_string()
-        });
+        let url = rpc_url
+            .or_else(get_default_rpc_url)
+            .unwrap_or_else(|| SOLANA_PUBLIC_RPC.to_string());
 
         Self {
             client: RpcClient::new(url),
@@ -182,5 +212,147 @@ impl SolanaClient {
             token_balances,
             total_usd_value: None,
         })
+    }
+
+    pub fn get_transactions(&self, address: &str, limit: usize) -> Result<Vec<SolanaTransaction>> {
+        let pubkey = Pubkey::from_str(address)
+            .context("Invalid Solana address")?;
+        let address_str = address.to_string();
+
+        // Get recent transaction signatures
+        let config = GetConfirmedSignaturesForAddress2Config {
+            limit: Some(limit),
+            ..Default::default()
+        };
+
+        let signatures = self.client
+            .get_signatures_for_address_with_config(&pubkey, config)
+            .context("Failed to fetch transaction signatures")?;
+
+        let mut transactions = Vec::new();
+
+        // Only fetch detailed info for first 20 transactions to avoid rate limits
+        let detail_limit = 20.min(signatures.len());
+
+        for (idx, sig_info) in signatures.iter().enumerate() {
+            let signature_str = sig_info.signature.clone();
+            let timestamp = sig_info.block_time;
+            let slot = sig_info.slot;
+            let success = sig_info.err.is_none();
+            let memo = sig_info.memo.clone();
+
+            // Try to get transaction details to calculate SOL change (only for first few)
+            let mut sol_change: f64 = 0.0;
+
+            if idx < detail_limit {
+                if let Ok(sig) = Signature::from_str(&signature_str) {
+                    let tx_config = RpcTransactionConfig {
+                        encoding: Some(UiTransactionEncoding::JsonParsed),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        max_supported_transaction_version: Some(0),
+                    };
+
+                    // Small delay between RPC calls to avoid rate limiting
+                    if idx > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+
+                    match self.client.get_transaction_with_config(&sig, tx_config) {
+                        Ok(tx) => {
+                            // Calculate balance change from pre/post balances
+                            if let Some(meta) = &tx.transaction.meta {
+                                // Get account keys from the transaction JSON
+                                let account_keys = Self::extract_account_keys(&tx.transaction.transaction)
+                                    .unwrap_or_default();
+
+                                for (i, key) in account_keys.iter().enumerate() {
+                                    if key == &address_str {
+                                        if i < meta.pre_balances.len() && i < meta.post_balances.len() {
+                                            let lamport_change = meta.post_balances[i] as i64 - meta.pre_balances[i] as i64;
+                                            sol_change = lamport_change as f64 / 1_000_000_000.0;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Transaction fetch failed - likely rate limited or old transaction
+                        }
+                    }
+                }
+            }
+
+            transactions.push(SolanaTransaction {
+                signature: signature_str,
+                timestamp,
+                slot,
+                success,
+                memo,
+                sol_change,
+            });
+        }
+
+        Ok(transactions)
+    }
+
+    fn extract_account_keys(tx: &solana_transaction_status_client_types::EncodedTransaction) -> Option<Vec<String>> {
+        use solana_transaction_status_client_types::EncodedTransaction;
+
+        match tx {
+            EncodedTransaction::Json(ui_tx) => {
+                // For JSON format, extract keys from the message
+                match &ui_tx.message {
+                    solana_transaction_status_client_types::UiMessage::Parsed(parsed) => {
+                        Some(parsed.account_keys.iter().map(|k| k.pubkey.clone()).collect())
+                    }
+                    solana_transaction_status_client_types::UiMessage::Raw(raw) => {
+                        Some(raw.account_keys.clone())
+                    }
+                }
+            }
+            EncodedTransaction::LegacyBinary(_) | EncodedTransaction::Binary(_, _) => {
+                // For binary formats, we'd need to decode - skip for now
+                None
+            }
+            EncodedTransaction::Accounts(accounts_tx) => {
+                Some(accounts_tx.account_keys.iter().map(|k| k.pubkey.clone()).collect())
+            }
+        }
+    }
+}
+
+// Implement PriceEnrichable trait for Solana balances
+impl crate::PriceEnrichable for AccountBalances {
+    const NATIVE_SYMBOL: &'static str = "SOL";
+
+    fn native_balance(&self) -> f64 {
+        self.sol_balance
+    }
+
+    fn set_native_usd_price(&mut self, price: f64) {
+        self.sol_usd_price = Some(price);
+    }
+
+    fn set_native_usd_value(&mut self, value: f64) {
+        self.sol_usd_value = Some(value);
+    }
+
+    fn set_total_usd_value(&mut self, value: f64) {
+        self.total_usd_value = Some(value);
+    }
+
+    fn enrich_token_balances(&mut self, price_cache: &HashMap<String, f64>) -> f64 {
+        let mut token_total = 0.0;
+        for token in &mut self.token_balances {
+            if let Some(symbol) = &token.symbol {
+                if let Some(&price) = price_cache.get(symbol) {
+                    token.usd_price = Some(price);
+                    token.usd_value = Some(token.ui_amount * price);
+                    token_total += token.usd_value.unwrap_or(0.0);
+                }
+            }
+        }
+        token_total
     }
 }

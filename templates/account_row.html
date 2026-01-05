@@ -1,0 +1,15 @@
+<tr id="account-{{ name|replace(" ", "-") }}">
+    <td>{{ name }}</td>
+    <td>{{ company }}</td>
+    <td class="truncate amount">{{ address }}</td>
+    <td><span class="chain-badge">{{ chain }}</span></td>
+    <td>
+        <button class="btn btn-sm btn-danger"
+                hx-delete="/accounts/{{ name }}"
+                hx-target="#account-{{ name|replace(" ", "-") }}"
+                hx-swap="outerHTML"
+                hx-confirm="Remove {{ name }}?">
+            Remove
+        </button>
+    </td>
+</tr>

@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="header">
+    <h1>Gringotts</h1>
+    <div class="actions">
+        <button id="query-btn" class="btn btn-primary"
+                hx-get="/balances"
+                hx-target="#balances"
+                hx-swap="innerHTML"
+                hx-indicator="#query-btn"
+                hx-on::before-request="document.getElementById('balances').innerHTML = document.getElementById('loading-template').innerHTML; document.getElementById('balances').scrollIntoView({behavior: 'smooth'});"
+                hx-on::after-request="document.getElementById('balances').scrollIntoView({behavior: 'smooth'});">
+            <span class="spinner htmx-indicator"></span>
+            <span class="btn-text">Query All Balances</span>
+        </button>
+    </div>
+</div>
+
+<template id="loading-template">
+    <div class="card loading-card">
+        <div class="loading-content">
+            <div class="spinner large"></div>
+            <h2>Querying Balances...</h2>
+            <p class="text-muted">Fetching data from blockchains and banking APIs. This may take a moment.</p>
+        </div>
+    </div>
+</template>
+
+<div class="summary">
+    <div class="summary-card card total-card" id="total-balance-card">
+        <div class="summary-value" id="total-balance">--</div>
+        <div class="summary-label">Total Portfolio Value</div>
+    </div>
+    <div class="summary-card card">
+        <div class="summary-value">{{ wallet_count }}</div>
+        <div class="summary-label">Wallets</div>
+    </div>
+    <div class="summary-card card">
+        <div class="summary-value">{{ bank_count }}</div>
+        <div class="summary-label">Bank Accounts</div>
+    </div>
+    <div class="summary-card card">
+        <div class="summary-value">{{ companies.len() }}</div>
+        <div class="summary-label">Companies</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Add Account</h2>
+    <form hx-post="/accounts" hx-on::after-request="if(event.detail.successful) { this.reset(); window.location.reload(); }">
+        <div class="form-row">
+            <input type="text" name="company" placeholder="Company (optional)">
+            <input type="text" name="name" placeholder="Name" required>
+            <input type="text" name="address" placeholder="Address" required>
+            <select name="chain">
+                <option value="">Auto-detect chain</option>
+                <option value="solana">Solana</option>
+                <option value="ethereum">Ethereum</option>
+                <option value="polygon">Polygon</option>
+                <option value="arbitrum">Arbitrum</option>
+                <option value="optimism">Optimism</option>
+                <option value="base">Base</option>
+                <option value="avalanche">Avalanche</option>
+                <option value="bsc">BSC</option>
+                <option value="near">NEAR</option>
+                <option value="aptos">Aptos</option>
+                <option value="sui">Sui</option>
+                <option value="starknet">Starknet</option>
+            </select>
+            <button type="submit" class="btn btn-primary">Add</button>
+        </div>
+    </form>
+</div>
+
+<div id="accounts-container">
+{% for company in companies %}
+<div class="card company-card" id="company-{{ company.name|replace(" ", "-") }}">
+    <div class="company-header">
+        <h2>{{ company.name }}</h2>
+        <span class="company-count">{{ company.wallets.len() + company.banking_accounts.len() }} account(s)</span>
+    </div>
+
+    {% if !company.wallets.is_empty() %}
+    <div class="account-section">
+        <h3 class="section-title">Crypto Wallets</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Address</th>
+                    <th>Chain</th>
+                    <th></th>
+                </tr>
+            </thead>
+            {% for wallet in company.wallets %}
+            <tbody id="account-{{ wallet.name|replace(" ", "-") }}">
+                <tr>
+                    <td><strong>{{ wallet.name }}</strong></td>
+                    <td class="truncate amount">{{ wallet.address }}</td>
+                    <td><span class="chain-badge">{{ wallet.chain }}</span></td>
+                    <td class="actions-cell">
+                        <button class="btn btn-sm"
+                                hx-get="/balances/{{ wallet.name }}"
+                                hx-target="#balance-{{ wallet.name|replace(" ", "-") }}"
+                                hx-swap="innerHTML"
+                                hx-indicator="#spinner-{{ wallet.name|replace(" ", "-") }}">
+                            <span class="spinner htmx-indicator" id="spinner-{{ wallet.name|replace(" ", "-") }}"></span>
+                            Query
+                        </button>
+                        <button class="btn btn-sm"
+                                hx-get="/transactions/{{ wallet.name }}"
+                                hx-target="#balance-{{ wallet.name|replace(" ", "-") }}"
+                                hx-swap="innerHTML"
+                                hx-indicator="#tx-spinner-{{ wallet.name|replace(" ", "-") }}">
+                            <span class="spinner htmx-indicator" id="tx-spinner-{{ wallet.name|replace(" ", "-") }}"></span>
+                            Txns
+                        </button>
+                        <button class="btn btn-sm btn-danger"
+                                hx-delete="/accounts/{{ wallet.name }}"
+                                hx-target="#account-{{ wallet.name|replace(" ", "-") }}"
+                                hx-swap="outerHTML"
+                                hx-confirm="Remove {{ wallet.name }}?">
+                            Remove
+                        </button>
+                    </td>
+                </tr>
+                <tr class="balance-row">
+                    <td colspan="4" id="balance-{{ wallet.name|replace(" ", "-") }}"></td>
+                </tr>
+            </tbody>
+            {% endfor %}
+        </table>
+    </div>
+    {% endif %}
+
+    {% if !company.banking_accounts.is_empty() %}
+    <div class="account-section">
+        <h3 class="section-title">Bank Accounts</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Account ID</th>
+                    <th>Service</th>
+                    <th></th>
+                </tr>
+            </thead>
+            {% for account in company.banking_accounts %}
+            <tbody id="account-{{ account.name|replace(" ", "-") }}">
+                <tr>
+                    <td><strong>{{ account.name }}</strong></td>
+                    <td class="truncate amount">{{ account.account_id }}</td>
+                    <td><span class="chain-badge bank">{{ account.service }}</span></td>
+                    <td class="actions-cell">
+                        <button class="btn btn-sm"
+                                hx-get="/balances/{{ account.name }}"
+                                hx-target="#balance-{{ account.name|replace(" ", "-") }}"
+                                hx-swap="innerHTML"
+                                hx-indicator="#spinner-{{ account.name|replace(" ", "-") }}">
+                            <span class="spinner htmx-indicator" id="spinner-{{ account.name|replace(" ", "-") }}"></span>
+                            Query
+                        </button>
+                        <button class="btn btn-sm"
+                                hx-get="/transactions/{{ account.name }}"
+                                hx-target="#balance-{{ account.name|replace(" ", "-") }}"
+                                hx-swap="innerHTML"
+                                hx-indicator="#tx-spinner-{{ account.name|replace(" ", "-") }}">
+                            <span class="spinner htmx-indicator" id="tx-spinner-{{ account.name|replace(" ", "-") }}"></span>
+                            Txns
+                        </button>
+                        <button class="btn btn-sm btn-danger"
+                                hx-delete="/accounts/{{ account.name }}"
+                                hx-target="#account-{{ account.name|replace(" ", "-") }}"
+                                hx-swap="outerHTML"
+                                hx-confirm="Remove {{ account.name }}?">
+                            Remove
+                        </button>
+                    </td>
+                </tr>
+                <tr class="balance-row">
+                    <td colspan="4" id="balance-{{ account.name|replace(" ", "-") }}"></td>
+                </tr>
+            </tbody>
+            {% endfor %}
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endfor %}
+
+{% if companies.is_empty() %}
+<div class="card">
+    <div class="empty">No accounts tracked yet. Add one above to get started.</div>
+</div>
+{% endif %}
+</div>
+
+<div id="balances"></div>
+
+<style>
+    .company-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .company-header h2 {
+        margin: 0;
+        color: var(--text);
+    }
+    .company-count {
+        color: var(--text-muted);
+        font-size: 0.875rem;
+    }
+    .account-section {
+        margin-top: 1rem;
+    }
+    .section-title {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        margin-bottom: 0.5rem;
+        font-weight: 500;
+    }
+    .company-card {
+        margin-bottom: 1.5rem;
+    }
+    .chain-badge.bank {
+        background: #238636;
+    }
+    .actions-cell {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: flex-end;
+    }
+    .balance-row td {
+        padding: 0;
+        border: none;
+    }
+    .balance-row td:empty {
+        display: none;
+    }
+    .total-card {
+        background: linear-gradient(135deg, #238636 0%, #2ea043 100%);
+        border-color: #238636;
+    }
+    .total-card .summary-value {
+        color: #fff;
+        font-size: 2rem;
+    }
+    .total-card .summary-label {
+        color: rgba(255,255,255,0.8);
+    }
+</style>
+{% endblock %}

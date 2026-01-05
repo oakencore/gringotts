@@ -1,0 +1,116 @@
+<div id="total-balance" hx-swap-oob="innerHTML">${{ total_usd|format_usd }}</div>
+
+<div class="card balances-card">
+    <div class="balances-header">
+        <h2>Portfolio Balances</h2>
+        <span class="timestamp">Updated: <span id="balance-time"></span></span>
+    </div>
+
+    {% if !error.is_empty() %}
+    <div class="empty" style="color: var(--danger);">{{ error }}</div>
+    {% else %}
+
+    <div class="portfolio-total">
+        <div class="total-label">Total Portfolio Value</div>
+        <div class="total-value">${{ total_usd|format_usd }}</div>
+    </div>
+
+    {% if companies.is_empty() %}
+    <div class="empty">No balances found. Add some accounts first.</div>
+    {% else %}
+
+    <div class="balances-grid">
+        {% for (company, assets) in companies %}
+        <div class="balance-company">
+            <h3>{{ company }}</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th style="text-align: right;">Balance</th>
+                        <th style="text-align: right;">USD Value</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for asset in assets %}
+                    <tr>
+                        <td><span class="chain-badge">{{ asset.symbol }}</span></td>
+                        <td class="amount" style="text-align: right;">{{ asset.amount|format_amount }}</td>
+                        <td class="amount positive" style="text-align: right;">
+                            {% if asset.usd_value > 0.0 %}
+                            ${{ asset.usd_value|format_usd }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% endif %}
+</div>
+
+<style>
+    .balances-card {
+        border: 2px solid var(--accent);
+        margin-top: 2rem;
+    }
+    .balances-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .balances-header h2 {
+        margin: 0;
+        color: var(--accent);
+    }
+    .timestamp {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+    }
+    .portfolio-total {
+        text-align: center;
+        padding: 1.5rem;
+        background: var(--bg);
+        border-radius: 6px;
+        margin-bottom: 1.5rem;
+    }
+    .total-label {
+        font-size: 0.875rem;
+        color: var(--text-muted);
+        margin-bottom: 0.5rem;
+    }
+    .total-value {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: var(--success);
+        font-family: 'SF Mono', Monaco, monospace;
+    }
+    .balances-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+        gap: 1.5rem;
+    }
+    .balance-company {
+        background: var(--bg);
+        border-radius: 6px;
+        padding: 1rem;
+    }
+    .balance-company h3 {
+        margin: 0 0 1rem 0;
+        font-size: 1rem;
+        color: var(--text);
+    }
+</style>
+
+<script>
+    document.getElementById('balance-time').textContent = new Date().toLocaleTimeString();
+</script>

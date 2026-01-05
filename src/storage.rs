@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Chain {
     Solana,
     Ethereum,
@@ -161,12 +162,11 @@ impl AddressBook {
         }
 
         // Auto-detect based on address format
-        if address.len() == 42 && address.starts_with("0x") {
-            if address[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        if address.len() == 42 && address.starts_with("0x")
+            && address[2..].chars().all(|c| c.is_ascii_hexdigit()) {
                 // EVM address, default to Ethereum
                 return Ok(Chain::Ethereum);
             }
-        }
 
         // Default to Solana for base58-encoded addresses
         Ok(Chain::Solana)
@@ -254,6 +254,39 @@ impl AddressBook {
             .context("Failed to get home directory")?;
 
         Ok(home.join(".gringotts").join("addresses.json"))
+    }
+
+    // For testing: load from specific path
+    #[cfg(test)]
+    pub fn load_from_path(path: &PathBuf) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+
+        let content = fs::read_to_string(path)
+            .context("Failed to read address book")?;
+
+        let book: AddressBook = serde_json::from_str(&content)
+            .context("Failed to parse address book")?;
+
+        Ok(book)
+    }
+
+    // For testing: save to specific path
+    #[cfg(test)]
+    pub fn save_to_path(&self, path: &PathBuf) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .context("Failed to create storage directory")?;
+        }
+
+        let content = serde_json::to_string_pretty(self)
+            .context("Failed to serialize address book")?;
+
+        fs::write(path, content)
+            .context("Failed to write address book")?;
+
+        Ok(())
     }
 
     pub fn add_banking_account(&mut self, company: String, name: String, account_id: String, service: String) -> Result<()> {

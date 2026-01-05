@@ -120,7 +120,7 @@ impl StarknetClient {
         // Parse balance result
         let balance_hex = result
             .as_array()
-            .and_then(|arr| arr.get(0))
+            .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid balance format"))?;
 
@@ -145,4 +145,27 @@ impl StarknetClient {
             total_usd_value: None,
         })
     }
+}
+
+// Implement PriceEnrichable trait for Starknet balances
+impl crate::PriceEnrichable for AccountBalances {
+    const NATIVE_SYMBOL: &'static str = "ETH";
+
+    fn native_balance(&self) -> f64 {
+        self.eth_balance
+    }
+
+    fn set_native_usd_price(&mut self, price: f64) {
+        self.eth_usd_price = Some(price);
+    }
+
+    fn set_native_usd_value(&mut self, value: f64) {
+        self.eth_usd_value = Some(value);
+    }
+
+    fn set_total_usd_value(&mut self, value: f64) {
+        self.total_usd_value = Some(value);
+    }
+
+    // Starknet doesn't have token balances yet, use default implementation
 }

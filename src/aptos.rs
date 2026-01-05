@@ -94,8 +94,7 @@ impl AptosClient {
             .await
             .context("Failed to parse view response")?;
 
-        let balance_octas: u64 = result
-            .get(0)
+        let balance_octas: u64 = result.first()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
@@ -114,4 +113,27 @@ impl AptosClient {
             total_usd_value: None,
         })
     }
+}
+
+// Implement PriceEnrichable trait for Aptos balances
+impl crate::PriceEnrichable for AccountBalances {
+    const NATIVE_SYMBOL: &'static str = "APT";
+
+    fn native_balance(&self) -> f64 {
+        self.apt_balance
+    }
+
+    fn set_native_usd_price(&mut self, price: f64) {
+        self.apt_usd_price = Some(price);
+    }
+
+    fn set_native_usd_value(&mut self, value: f64) {
+        self.apt_usd_value = Some(value);
+    }
+
+    fn set_total_usd_value(&mut self, value: f64) {
+        self.total_usd_value = Some(value);
+    }
+
+    // Aptos doesn't have token balances yet, use default implementation
 }

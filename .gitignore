@@ -31,3 +31,6 @@ node_modules/
 
 # Price feed config (user-specific)
 feedIds.json
+
+# Project-specific AI instructions
+CLAUDE.md

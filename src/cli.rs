@@ -129,4 +129,11 @@ pub enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// Start the web server with HTMX frontend
+    Serve {
+        /// Port to listen on
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+    },
 }

@@ -1,13 +1,22 @@
 use anyhow::{Context, Result};
 use i_am_surging::SurgeClient;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// PriceService using Switchboard Surge for cryptocurrency prices
 /// Provides efficient price queries for 2,266+ trading pairs
 pub struct PriceService {
     surge_client: SurgeClient,
 }
+
+// Global rate limiter shared across all PriceService instances
+static LAST_REQUEST_MS: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
+// Minimum delay between API requests to avoid rate limiting (1 second)
+const MIN_REQUEST_DELAY_MS: u64 = 1000;
 
 impl PriceService {
     pub fn new() -> Result<Self> {
@@ -25,6 +34,27 @@ impl PriceService {
         Ok(Self { surge_client })
     }
 
+    fn current_time_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_millis() as u64
+    }
+
+    /// Rate limit API requests to avoid 429 errors (uses global state)
+    async fn rate_limit() {
+        let last = LAST_REQUEST_MS.load(Ordering::SeqCst);
+        let now = Self::current_time_ms();
+        let elapsed = now.saturating_sub(last);
+
+        if elapsed < MIN_REQUEST_DELAY_MS {
+            let sleep_time = MIN_REQUEST_DELAY_MS - elapsed;
+            tokio::time::sleep(Duration::from_millis(sleep_time)).await;
+        }
+
+        LAST_REQUEST_MS.store(Self::current_time_ms(), Ordering::SeqCst);
+    }
+
     fn get_api_key() -> Result<String> {
         env::var("SURGE_API_KEY")
             .context("SURGE_API_KEY environment variable not set. Get your API key (Solana wallet address) from https://switchboard.xyz")
@@ -32,20 +62,15 @@ impl PriceService {
 
     /// Get price for a single token symbol (e.g., "SOL", "ETH", "BTC")
     /// Returns price in USD
-    async fn get_single_price(&self, symbol: &str) -> Result<f64> {
+    pub async fn get_single_price(&self, symbol: &str) -> Result<f64> {
+        Self::rate_limit().await;
+
         // Convert symbol to trading pair format (e.g., "SOL" -> "SOL/USD")
         let trading_pair = format!("{}/USD", symbol);
 
         match self.surge_client.get_price(&trading_pair).await {
             Ok(price_data) => Ok(price_data.value),
             Err(e) => {
-                // Try alternate quote currencies if USD fails
-                for quote in &["USDT", "USDC"] {
-                    let alt_pair = format!("{}/{}", symbol, quote);
-                    if let Ok(price_data) = self.surge_client.get_price(&alt_pair).await {
-                        return Ok(price_data.value);
-                    }
-                }
                 anyhow::bail!("Failed to get price for {}: {}", symbol, e)
             }
         }
@@ -126,6 +151,8 @@ impl PriceService {
             return Ok(HashMap::new());
         }
 
+        Self::rate_limit().await;
+
         // Convert symbols to trading pairs
         let trading_pairs: Vec<String> = symbols
             .iter()
@@ -149,11 +176,16 @@ impl PriceService {
             }
             Err(e) => {
                 eprintln!("Warning: Batch fetch failed: {}", e);
-                // Fall back to individual queries
+                // Fall back to individual queries with rate limiting
                 let mut prices = HashMap::new();
                 for symbol in symbols {
-                    if let Ok(price) = self.get_single_price(symbol).await {
-                        prices.insert(symbol.clone(), price);
+                    match self.get_single_price(symbol).await {
+                        Ok(price) => {
+                            prices.insert(symbol.clone(), price);
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to get price for {}/USD: {}", symbol, e);
+                        }
                     }
                 }
                 Ok(prices)
@@ -164,10 +196,10 @@ impl PriceService {
     /// Batch fetch all prices for known symbols in a single API call
     /// This is more efficient than making separate calls for SOL, ETH, and tokens
     pub async fn batch_fetch_all_known_prices(&self) -> Result<HashMap<String, f64>> {
+        // Only include symbols that have feeds on Switchboard
         let known_symbols = vec![
-            "SOL", "ETH", "BTC", "USDC", "USDT", "DAI",
-            "MSOL", "stSOL", "SWTCH", "JTO", "RAT",
-            "NEAR", "APT", "SUI", "AVAX", "MATIC", "BNB"
+            "SOL", "ETH", "BTC", "USDC", "USDT",
+            "NEAR", "APT", "SUI", "AVAX", "BNB"
         ];
 
         self.batch_fetch_prices(&known_symbols.iter().map(|s| s.to_string()).collect::<Vec<_>>()).await
@@ -182,7 +214,7 @@ mod tests {
     async fn test_get_sol_price() {
         // This test requires SURGE_API_KEY environment variable
         if env::var("SURGE_API_KEY").is_ok() {
-            let service = PriceService::new();
+            let service = PriceService::new().expect("Failed to create price service");
             let price = service.get_single_price("SOL").await;
             assert!(price.is_ok());
             let price = price.unwrap();
@@ -195,7 +227,7 @@ mod tests {
     async fn test_batch_fetch() {
         // This test requires SURGE_API_KEY environment variable
         if env::var("SURGE_API_KEY").is_ok() {
-            let service = PriceService::new();
+            let service = PriceService::new().expect("Failed to create price service");
             let symbols = vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()];
             let prices = service.batch_fetch_prices(&symbols).await;
             assert!(prices.is_ok());

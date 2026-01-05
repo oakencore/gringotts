@@ -131,3 +131,26 @@ impl SuiClient {
         })
     }
 }
+
+// Implement PriceEnrichable trait for Sui balances
+impl crate::PriceEnrichable for AccountBalances {
+    const NATIVE_SYMBOL: &'static str = "SUI";
+
+    fn native_balance(&self) -> f64 {
+        self.sui_balance
+    }
+
+    fn set_native_usd_price(&mut self, price: f64) {
+        self.sui_usd_price = Some(price);
+    }
+
+    fn set_native_usd_value(&mut self, value: f64) {
+        self.sui_usd_value = Some(value);
+    }
+
+    fn set_total_usd_value(&mut self, value: f64) {
+        self.total_usd_value = Some(value);
+    }
+
+    // Sui doesn't have token balances yet, use default implementation
+}

@@ -2,17 +2,46 @@ use anyhow::{Context, Result};
 use crate::storage::Chain;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::env;
+use std::collections::HashMap;
 
-fn get_default_rpc_url(chain: &Chain) -> Result<&'static str> {
+fn get_alchemy_rpc_url(chain: &Chain, api_key: &str) -> Option<String> {
     match chain {
-        Chain::Ethereum => Ok("https://eth.llamarpc.com"),
-        Chain::Polygon => Ok("https://polygon-rpc.com"),
-        Chain::BinanceSmartChain => Ok("https://bsc-dataseed.binance.org"),
-        Chain::Arbitrum => Ok("https://arb1.arbitrum.io/rpc"),
-        Chain::Optimism => Ok("https://mainnet.optimism.io"),
-        Chain::Avalanche => Ok("https://api.avax.network/ext/bc/C/rpc"),
-        Chain::Base => Ok("https://mainnet.base.org"),
-        Chain::Core => Ok("https://rpc.coredao.org"),
+        Chain::Ethereum => Some(format!("https://eth-mainnet.g.alchemy.com/v2/{}", api_key)),
+        Chain::Polygon => Some(format!("https://polygon-mainnet.g.alchemy.com/v2/{}", api_key)),
+        Chain::Arbitrum => Some(format!("https://arb-mainnet.g.alchemy.com/v2/{}", api_key)),
+        Chain::Optimism => Some(format!("https://opt-mainnet.g.alchemy.com/v2/{}", api_key)),
+        Chain::Base => Some(format!("https://base-mainnet.g.alchemy.com/v2/{}", api_key)),
+        _ => None, // Chain not supported by Alchemy
+    }
+}
+
+fn get_default_rpc_url(chain: &Chain) -> Result<String> {
+    // Try Alchemy first if API key is set and non-empty
+    if let Ok(api_key) = env::var("ALCHEMY_API_KEY") {
+        if !api_key.is_empty() {
+            if let Some(alchemy_url) = get_alchemy_rpc_url(chain, &api_key) {
+                return Ok(alchemy_url);
+            }
+        }
+    } else {
+        // Only show warning for commonly used chains to avoid spam
+        if matches!(chain, Chain::Base) {
+            eprintln!("Warning: ALCHEMY_API_KEY not set. Using public EVM RPCs.");
+            eprintln!("For better performance and higher limits, get an Alchemy API key at https://alchemy.com");
+        }
+    }
+
+    // Fall back to public RPCs
+    match chain {
+        Chain::Ethereum => Ok("https://eth.llamarpc.com".to_string()),
+        Chain::Polygon => Ok("https://polygon-rpc.com".to_string()),
+        Chain::BinanceSmartChain => Ok("https://bsc-dataseed.binance.org".to_string()),
+        Chain::Arbitrum => Ok("https://arb1.arbitrum.io/rpc".to_string()),
+        Chain::Optimism => Ok("https://mainnet.optimism.io".to_string()),
+        Chain::Avalanche => Ok("https://api.avax.network/ext/bc/C/rpc".to_string()),
+        Chain::Base => Ok("https://mainnet.base.org".to_string()),
+        Chain::Core => Ok("https://rpc.coredao.org".to_string()),
         _ => anyhow::bail!("Chain {:?} is not an EVM chain", chain),
     }
 }
@@ -111,7 +140,7 @@ impl EvmClient {
     pub fn new(rpc_url: Option<String>, chain: Chain) -> Result<Self> {
         let url = match rpc_url {
             Some(u) => u,
-            None => get_default_rpc_url(&chain)?.to_string(),
+            None => get_default_rpc_url(&chain)?,
         };
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -188,9 +217,6 @@ impl EvmClient {
         let common_tokens = get_common_tokens(&self.chain);
 
         for (token_address, symbol) in common_tokens {
-            // Add delay between token queries to avoid rate limiting
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
             match self.query_erc20_balance(address, token_address).await {
                 Ok(Some(token_balance)) => {
                     token_balances.push(token_balance);
@@ -246,14 +272,9 @@ impl EvmClient {
             return Ok(None);
         }
 
-        // Query token metadata with delays between calls
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Query token metadata
         let decimals = self.query_erc20_decimals(token_address).await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         let name = self.query_erc20_name(token_address).await.ok();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         let symbol = self.query_erc20_symbol(token_address).await.ok();
 
         // Calculate UI amount
@@ -359,5 +380,40 @@ impl EvmClient {
             .to_string();
 
         Ok(result)
+    }
+}
+
+// Implement PriceEnrichable trait for EVM balances
+impl crate::PriceEnrichable for AccountBalances {
+    const NATIVE_SYMBOL: &'static str = "ETH";
+
+    fn native_balance(&self) -> f64 {
+        self.eth_balance
+    }
+
+    fn set_native_usd_price(&mut self, price: f64) {
+        self.eth_usd_price = Some(price);
+    }
+
+    fn set_native_usd_value(&mut self, value: f64) {
+        self.eth_usd_value = Some(value);
+    }
+
+    fn set_total_usd_value(&mut self, value: f64) {
+        self.total_usd_value = Some(value);
+    }
+
+    fn enrich_token_balances(&mut self, price_cache: &HashMap<String, f64>) -> f64 {
+        let mut token_total = 0.0;
+        for token in &mut self.token_balances {
+            if let Some(symbol) = &token.symbol {
+                if let Some(&price) = price_cache.get(symbol) {
+                    token.usd_price = Some(price);
+                    token.usd_value = Some(token.ui_amount * price);
+                    token_total += token.usd_value.unwrap_or(0.0);
+                }
+            }
+        }
+        token_total
     }
 }
