@@ -198,7 +198,29 @@ gringotts serve
 gringotts serve --port 8080
 ```
 
-Access the dashboard at `http://localhost:3000` for an interactive HTMX-powered interface.
+**Access the dashboard:**
+
+- **Local access:** `http://localhost:3000`
+- **Network access:** `http://<your-ip>:3000` (accessible from any device on your local network)
+
+**Find your IP address:**
+
+```bash
+# macOS/Linux
+ifconfig | grep "inet " | grep -v 127.0.0.1
+
+# Or use this simpler command on macOS
+ipconfig getifaddr en0
+
+# Windows
+ipconfig
+```
+
+The web server binds to `0.0.0.0`, making it accessible to all devices on your local network. This is useful for:
+
+- Viewing your portfolio on mobile devices
+- Sharing read-only access with team members on the same network
+- Running on a server and accessing from other computers
 
 ### Supported Chains
 

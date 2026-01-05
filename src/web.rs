@@ -181,8 +181,19 @@ pub async fn start_server(port: u16) -> anyhow::Result<()> {
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    println!("Starting Gringotts web server at http://{}", addr);
+    // Bind to 0.0.0.0 to accept connections from local network
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║          Gringotts Web Server Started                        ║");
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║  Local:          http://localhost:{}                       ║", port);
+    println!("║  Network:        http://<your-ip>:{}                      ║", port);
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║  To find your IP address:                                    ║");
+    println!("║    macOS/Linux:  ifconfig | grep 'inet '                    ║");
+    println!("║    Windows:      ipconfig                                    ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
