@@ -135,5 +135,10 @@ pub enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
         port: u16,
+
+        /// Background refresh interval (e.g., 4h, 30m, 1d). Overrides GRINGOTTS_REFRESH_INTERVAL env var.
+        /// Default: 4h
+        #[arg(short = 'r', long)]
+        refresh_interval: Option<String>,
     },
 }
