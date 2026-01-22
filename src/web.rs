@@ -1,4 +1,5 @@
 use crate::aptos::AptosClient;
+use crate::cache::{CachedBalance, CachedToken, SharedCache};
 use crate::circle::CircleClient;
 use crate::evm::EvmClient;
 use crate::mercury::MercuryClient;
@@ -11,7 +12,7 @@ use crate::sui::SuiClient;
 
 use askama::Template;
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{delete, get, post},
@@ -20,6 +21,7 @@ use axum::{
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 // Custom filter for formatting USD values
 mod filters {
@@ -172,14 +174,33 @@ struct AddAccountForm {
     chain: String,
 }
 
+/// Application state shared across handlers
+#[derive(Clone)]
+pub struct AppState {
+    pub cache: SharedCache,
+}
+
 pub async fn start_server(port: u16) -> anyhow::Result<()> {
+    // Load address book to verify it exists
+    let book = AddressBook::load().unwrap_or_else(|_| AddressBook::new());
+    let wallet_count = book.addresses.len();
+    let bank_count = book.banking_accounts.len();
+
+    // Initialize shared cache - loads from disk if available
+    let cache = SharedCache::new();
+    let cache_age = cache.read().await.cache_age_string();
+
+    let state = Arc::new(AppState { cache });
+
     let app = Router::new()
         .route("/", get(index))
         .route("/accounts", post(add_account))
         .route("/accounts/:name", delete(remove_account))
         .route("/balances", get(query_balances))
         .route("/balances/:name", get(query_single_balance))
-        .route("/transactions/:name", get(get_transactions));
+        .route("/transactions/:name", get(get_transactions))
+        .route("/api/cache/status", get(cache_status))
+        .with_state(state);
 
     // Bind to 0.0.0.0 to accept connections from local network
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -190,6 +211,10 @@ pub async fn start_server(port: u16) -> anyhow::Result<()> {
     println!("║  Local:          http://localhost:{}                       ║", port);
     println!("║  Network:        http://<your-ip>:{}                      ║", port);
     println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║  Address Book:   {} wallets, {} bank accounts              ║", wallet_count, bank_count);
+    println!("║  Cache:          ~/.gringotts/cache.json                    ║");
+    println!("║  Last refresh:   {:>42} ║", cache_age);
+    println!("╠═══════════════════════════════════════════════════════════════╣");
     println!("║  To find your IP address:                                    ║");
     println!("║    macOS/Linux:  ifconfig | grep 'inet '                    ║");
     println!("║    Windows:      ipconfig                                    ║");
@@ -199,6 +224,17 @@ pub async fn start_server(port: u16) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// API endpoint to check cache status
+async fn cache_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cache = state.cache.read().await;
+    let status = serde_json::json!({
+        "last_refresh": cache.cache_age_string(),
+        "cached_balances": cache.balances.len(),
+        "cached_prices": cache.prices.data.len(),
+    });
+    (StatusCode::OK, axum::Json(status))
 }
 
 async fn index() -> impl IntoResponse {
@@ -348,7 +384,7 @@ async fn remove_account(Path(name): Path<String>) -> impl IntoResponse {
     (StatusCode::OK, Html(String::new()))
 }
 
-async fn query_balances() -> impl IntoResponse {
+async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let book = match AddressBook::load() {
         Ok(b) => b,
         Err(e) => {
@@ -396,13 +432,33 @@ async fn query_balances() -> impl IntoResponse {
                     let sol_entry = entry.entry("SOL".to_string()).or_insert((0.0, 0.0));
                     sol_entry.0 += balances.sol_balance;
 
+                    // Build tokens for cache
+                    let mut cached_tokens = vec![];
                     for token in &balances.token_balances {
                         if let Some(symbol) = &token.symbol {
                             all_symbols.insert(symbol.clone());
                             let token_entry = entry.entry(symbol.clone()).or_insert((0.0, 0.0));
                             token_entry.0 += token.ui_amount;
+                            cached_tokens.push(CachedToken {
+                                symbol: symbol.clone(),
+                                balance: token.ui_amount,
+                                usd_value: token.usd_value,
+                            });
                         }
                     }
+
+                    // Update cache
+                    let cached_balance = CachedBalance {
+                        name: wallet.name.clone(),
+                        address_or_id: wallet.address.clone(),
+                        chain_or_service: wallet.chain.display_name().to_string(),
+                        native_symbol: "SOL".to_string(),
+                        native_balance: balances.sol_balance,
+                        native_usd_value: balances.sol_usd_value,
+                        tokens: cached_tokens,
+                        total_usd_value: balances.total_usd_value,
+                    };
+                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
                 }
             }
             Chain::Near => {
@@ -417,6 +473,19 @@ async fn query_balances() -> impl IntoResponse {
                     let entry = portfolio.entry(company.to_string()).or_default();
                     let near_entry = entry.entry("NEAR".to_string()).or_insert((0.0, 0.0));
                     near_entry.0 += balances.near_balance;
+
+                    // Update cache
+                    let cached_balance = CachedBalance {
+                        name: wallet.name.clone(),
+                        address_or_id: wallet.address.clone(),
+                        chain_or_service: wallet.chain.display_name().to_string(),
+                        native_symbol: "NEAR".to_string(),
+                        native_balance: balances.near_balance,
+                        native_usd_value: balances.near_usd_value,
+                        tokens: vec![],
+                        total_usd_value: balances.total_usd_value,
+                    };
+                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
                 }
             }
             Chain::Aptos => {
@@ -431,6 +500,19 @@ async fn query_balances() -> impl IntoResponse {
                     let entry = portfolio.entry(company.to_string()).or_default();
                     let apt_entry = entry.entry("APT".to_string()).or_insert((0.0, 0.0));
                     apt_entry.0 += balances.apt_balance;
+
+                    // Update cache
+                    let cached_balance = CachedBalance {
+                        name: wallet.name.clone(),
+                        address_or_id: wallet.address.clone(),
+                        chain_or_service: wallet.chain.display_name().to_string(),
+                        native_symbol: "APT".to_string(),
+                        native_balance: balances.apt_balance,
+                        native_usd_value: balances.apt_usd_value,
+                        tokens: vec![],
+                        total_usd_value: balances.total_usd_value,
+                    };
+                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
                 }
             }
             Chain::Sui => {
@@ -445,6 +527,19 @@ async fn query_balances() -> impl IntoResponse {
                     let entry = portfolio.entry(company.to_string()).or_default();
                     let sui_entry = entry.entry("SUI".to_string()).or_insert((0.0, 0.0));
                     sui_entry.0 += balances.sui_balance;
+
+                    // Update cache
+                    let cached_balance = CachedBalance {
+                        name: wallet.name.clone(),
+                        address_or_id: wallet.address.clone(),
+                        chain_or_service: wallet.chain.display_name().to_string(),
+                        native_symbol: "SUI".to_string(),
+                        native_balance: balances.sui_balance,
+                        native_usd_value: balances.sui_usd_value,
+                        tokens: vec![],
+                        total_usd_value: balances.total_usd_value,
+                    };
+                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
                 }
             }
             Chain::Starknet => {
@@ -459,6 +554,19 @@ async fn query_balances() -> impl IntoResponse {
                     let entry = portfolio.entry(company.to_string()).or_default();
                     let eth_entry = entry.entry("ETH".to_string()).or_insert((0.0, 0.0));
                     eth_entry.0 += balances.eth_balance;
+
+                    // Update cache
+                    let cached_balance = CachedBalance {
+                        name: wallet.name.clone(),
+                        address_or_id: wallet.address.clone(),
+                        chain_or_service: wallet.chain.display_name().to_string(),
+                        native_symbol: "ETH".to_string(),
+                        native_balance: balances.eth_balance,
+                        native_usd_value: balances.eth_usd_value,
+                        tokens: vec![],
+                        total_usd_value: balances.total_usd_value,
+                    };
+                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
                 }
             }
             // EVM chains
@@ -484,13 +592,32 @@ async fn query_balances() -> impl IntoResponse {
                             entry.entry(native_symbol.to_string()).or_insert((0.0, 0.0));
                         native_entry.0 += balances.eth_balance;
 
+                        let mut cached_tokens = vec![];
                         for token in &balances.token_balances {
                             if let Some(symbol) = &token.symbol {
                                 all_symbols.insert(symbol.clone());
                                 let token_entry = entry.entry(symbol.clone()).or_insert((0.0, 0.0));
                                 token_entry.0 += token.ui_amount;
+                                cached_tokens.push(CachedToken {
+                                    symbol: symbol.clone(),
+                                    balance: token.ui_amount,
+                                    usd_value: token.usd_value,
+                                });
                             }
                         }
+
+                        // Update cache
+                        let cached_balance = CachedBalance {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            native_symbol: native_symbol.to_string(),
+                            native_balance: balances.eth_balance,
+                            native_usd_value: balances.eth_usd_value,
+                            tokens: cached_tokens,
+                            total_usd_value: balances.total_usd_value,
+                        };
+                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
                     }
                 }
             }
@@ -512,6 +639,19 @@ async fn query_balances() -> impl IntoResponse {
                         let usd_entry = entry.entry("USD".to_string()).or_insert((0.0, 0.0));
                         usd_entry.0 += balances.current_balance;
                         usd_entry.1 += balances.current_balance; // USD is already in USD
+
+                        // Update cache
+                        let cached_balance = CachedBalance {
+                            name: account.name.clone(),
+                            address_or_id: account.account_id.clone(),
+                            chain_or_service: "Mercury Banking".to_string(),
+                            native_symbol: "USD".to_string(),
+                            native_balance: balances.current_balance,
+                            native_usd_value: Some(balances.current_balance),
+                            tokens: vec![],
+                            total_usd_value: Some(balances.current_balance),
+                        };
+                        let _ = state.cache.update_balance(&account.name, cached_balance).await;
                     }
                 }
             }
@@ -524,6 +664,8 @@ async fn query_balances() -> impl IntoResponse {
                             &account.company
                         };
                         let entry = portfolio.entry(company.to_string()).or_default();
+                        let mut cached_tokens = vec![];
+                        let mut total_usd = 0.0;
                         for balance in &balances.available_balances {
                             let symbol = match balance.currency.as_str() {
                                 "USD" => "USDC",
@@ -534,8 +676,27 @@ async fn query_balances() -> impl IntoResponse {
                             currency_entry.0 += balance.amount;
                             if balance.currency == "USD" {
                                 currency_entry.1 += balance.amount;
+                                total_usd += balance.amount;
                             }
+                            cached_tokens.push(CachedToken {
+                                symbol: symbol.to_string(),
+                                balance: balance.amount,
+                                usd_value: if balance.currency == "USD" { Some(balance.amount) } else { None },
+                            });
                         }
+
+                        // Update cache
+                        let cached_balance = CachedBalance {
+                            name: account.name.clone(),
+                            address_or_id: account.account_id.clone(),
+                            chain_or_service: "Circle".to_string(),
+                            native_symbol: "USD".to_string(),
+                            native_balance: total_usd,
+                            native_usd_value: Some(total_usd),
+                            tokens: cached_tokens,
+                            total_usd_value: Some(total_usd),
+                        };
+                        let _ = state.cache.update_balance(&account.name, cached_balance).await;
                     }
                 }
             }
@@ -543,9 +704,12 @@ async fn query_balances() -> impl IntoResponse {
     }
 
     // Fetch prices for crypto assets
-    if let Ok(price_service) = PriceService::new() {
+    if let Ok(mut price_service) = PriceService::new() {
         let symbols: Vec<String> = all_symbols.into_iter().collect();
         if let Ok(prices) = price_service.batch_fetch_prices(&symbols).await {
+            // Update price cache
+            let _ = state.cache.update_prices(prices.clone()).await;
+
             // Apply prices to portfolio
             for assets in portfolio.values_mut() {
                 for (symbol, (amount, usd_value)) in assets.iter_mut() {
@@ -558,6 +722,9 @@ async fn query_balances() -> impl IntoResponse {
             }
         }
     }
+
+    // Mark full refresh
+    let _ = state.cache.mark_refresh().await;
 
     // Calculate totals and format for template
     let mut total_usd = 0.0;
@@ -656,7 +823,7 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
     let mut error = String::new();
 
     // Fetch prices
-    let price_cache: HashMap<String, f64> = if let Ok(price_service) = PriceService::new() {
+    let price_cache: HashMap<String, f64> = if let Ok(mut price_service) = PriceService::new() {
         price_service
             .batch_fetch_all_known_prices()
             .await

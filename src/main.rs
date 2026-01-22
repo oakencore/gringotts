@@ -11,6 +11,7 @@ mod starknet;
 mod mercury;
 mod circle;
 mod web;
+mod cache;
 
 use anyhow::Result;
 use clap::Parser;
@@ -450,15 +451,25 @@ fn extract_token_symbols(all_balances: &[WalletBalances]) -> HashSet<String> {
     symbols
 }
 
-// Helper function to fetch USD prices for token symbols
-async fn fetch_prices_for_symbols(symbols: HashSet<String>) -> Result<HashMap<String, f64>> {
-    let mut price_cache: HashMap<String, f64> = HashMap::new();
+/// Result of price fetching - includes whether prices came from cache
+pub struct PriceFetchResult {
+    pub prices: HashMap<String, f64>,
+    pub from_cache: bool,
+    pub cache_age: Option<String>,
+}
 
+// Helper function to fetch USD prices for token symbols
+// Uses cache fallback if API fails
+async fn fetch_prices_for_symbols(symbols: HashSet<String>) -> Result<PriceFetchResult> {
     if symbols.is_empty() {
-        return Ok(price_cache);
+        return Ok(PriceFetchResult {
+            prices: HashMap::new(),
+            from_cache: false,
+            cache_age: None,
+        });
     }
 
-    let price_service = PriceService::new()?;
+    let mut price_service = PriceService::new()?;
     let price_pb = ProgressBar::new_spinner();
     price_pb.set_style(
         ProgressStyle::default_spinner()
@@ -469,19 +480,33 @@ async fn fetch_prices_for_symbols(symbols: HashSet<String>) -> Result<HashMap<St
     price_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let symbols_vec: Vec<String> = symbols.into_iter().collect();
-    match price_service.batch_fetch_prices(&symbols_vec).await {
-        Ok(prices) => {
-            price_cache = prices;
-            price_pb.finish_with_message(format!("✓ Successfully fetched prices for {} symbols", price_cache.len()));
-        }
-        Err(e) => {
-            price_pb.finish_with_message(format!("⚠ Failed to fetch prices: {}", e));
-            price_pb.println("Balances will be displayed without USD values.");
-        }
+    let (prices, from_cache) = price_service.fetch_prices_with_fallback(&symbols_vec).await?;
+
+    let cache_age = if from_cache || !prices.is_empty() {
+        Some(price_service.cache_age())
+    } else {
+        None
+    };
+
+    if from_cache {
+        price_pb.finish_with_message(format!(
+            "✓ Using cached prices for {} symbols (updated {})",
+            prices.len(),
+            cache_age.as_ref().unwrap_or(&"unknown".to_string())
+        ));
+    } else if !prices.is_empty() {
+        price_pb.finish_with_message(format!("✓ Successfully fetched prices for {} symbols", prices.len()));
+    } else {
+        price_pb.finish_with_message("⚠ Failed to fetch prices and no cache available");
+        price_pb.println("Balances will be displayed without USD values.");
     }
     println!();
 
-    Ok(price_cache)
+    Ok(PriceFetchResult {
+        prices,
+        from_cache,
+        cache_age,
+    })
 }
 
 // Helper function to enrich balances with prices and display them
@@ -560,18 +585,24 @@ async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
     let all_balances = fetch_all_balances(&book, rpc_url).await;
 
     // Extract symbols and fetch prices (skip if --no-prices)
-    let price_cache = if !no_prices {
+    let (price_cache, price_info) = if !no_prices {
         let symbols = extract_token_symbols(&all_balances);
-        fetch_prices_for_symbols(symbols).await?
+        let result = fetch_prices_for_symbols(symbols).await?;
+        let info = if result.from_cache {
+            result.cache_age.map(|age| format!("Prices from cache (updated {})", age))
+        } else {
+            None
+        };
+        (result.prices, info)
     } else {
-        HashMap::new()
+        (HashMap::new(), None)
     };
 
     // Enrich balances with prices and display
     let portfolio = enrich_and_display_balances(all_balances, &price_cache);
 
-    // Display portfolio summary
-    ui::render_portfolio_summary(&portfolio);
+    // Display portfolio summary with cache info
+    ui::render_portfolio_summary(&portfolio, price_info.as_deref());
 
     Ok(())
 }
@@ -585,51 +616,50 @@ async fn query_one(identifier: String, rpc_url: Option<String>, no_prices: bool)
     if let Some(wallet) = wallet {
         println!("\nQuerying balance for '{}'...\n", wallet.name);
 
-        let price_service = PriceService::new()?;
+        let mut price_service = PriceService::new()?;
         let mut price_cache: HashMap<String, f64> = HashMap::new();
 
         // Pre-fetch prices for common symbols if not in no_prices mode
         if !no_prices {
             println!("Fetching cryptocurrency prices...");
             let symbols = vec!["SOL".to_string(), "ETH".to_string(), "USDC".to_string(), "USDT".to_string()];
-            match price_service.batch_fetch_prices(&symbols).await {
-                Ok(prices) => {
-                    price_cache = prices;
-                    println!("Successfully fetched prices\n");
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to fetch prices: {}", e);
-                    eprintln!("Will attempt to fetch prices individually as needed.\n");
-                }
+            let (prices, from_cache) = price_service.fetch_prices_with_fallback(&symbols).await?;
+            price_cache = prices;
+            if from_cache {
+                println!("Using cached prices (updated {})\n", price_service.cache_age());
+            } else if !price_cache.is_empty() {
+                println!("Successfully fetched prices\n");
+            } else {
+                eprintln!("Warning: Failed to fetch prices and no cache available.\n");
             }
         }
 
     match &wallet.chain {
         Chain::Solana => {
             let client = SolanaClient::new(rpc_url);
-            query_and_display_solana(&client, wallet, &price_service, &mut price_cache, no_prices).await?;
+            query_and_display_solana(&client, wallet, &mut price_service, &mut price_cache, no_prices).await?;
         }
         Chain::Near => {
             let client = NearClient::new(rpc_url);
-            query_and_display_near(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache).await?;
+            query_and_display_near(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &mut price_service, &mut price_cache).await?;
         }
         Chain::Aptos => {
             let client = AptosClient::new(rpc_url);
-            query_and_display_aptos(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache).await?;
+            query_and_display_aptos(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &mut price_service, &mut price_cache).await?;
         }
         Chain::Sui => {
             let client = SuiClient::new(rpc_url);
-            query_and_display_sui(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache).await?;
+            query_and_display_sui(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &mut price_service, &mut price_cache).await?;
         }
         Chain::Starknet => {
             let client = StarknetClient::new(rpc_url);
-            query_and_display_starknet(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &price_service, &mut price_cache).await?;
+            query_and_display_starknet(&client, &wallet.company, &wallet.name, &wallet.address, &wallet.chain, &mut price_service, &mut price_cache).await?;
         }
         // All EVM chains
         Chain::Ethereum | Chain::Polygon | Chain::BinanceSmartChain | Chain::Arbitrum
         | Chain::Optimism | Chain::Avalanche | Chain::Base | Chain::Core => {
             let client = EvmClient::new(rpc_url, wallet.chain.clone())?;
-            query_and_display_evm(&client, wallet, &price_service, &mut price_cache, no_prices).await?;
+            query_and_display_evm(&client, wallet, &mut price_service, &mut price_cache, no_prices).await?;
         }
     }
 
@@ -664,7 +694,7 @@ async fn query_one(identifier: String, rpc_url: Option<String>, no_prices: bool)
 
 async fn enrich_with_usd_prices(
     balances: &mut solana::AccountBalances,
-    price_service: &PriceService,
+    price_service: &mut PriceService,
     price_cache: &mut HashMap<String, f64>,
 ) -> Result<()> {
     // Enrich SOL price
@@ -713,7 +743,7 @@ async fn enrich_with_usd_prices(
 
 async fn enrich_with_eth_prices(
     balances: &mut evm::AccountBalances,
-    price_service: &PriceService,
+    price_service: &mut PriceService,
     price_cache: &mut HashMap<String, f64>,
 ) -> Result<()> {
     // Enrich ETH price
@@ -763,7 +793,7 @@ async fn enrich_with_eth_prices(
 async fn query_and_display_solana(
     client: &SolanaClient,
     wallet: &WalletAddress,
-    price_service: &PriceService,
+    price_service: &mut PriceService,
     price_cache: &mut HashMap<String, f64>,
     no_prices: bool,
 ) -> Result<solana::AccountBalances> {
@@ -790,7 +820,7 @@ async fn query_and_display_solana(
 async fn query_and_display_evm(
     client: &EvmClient,
     wallet: &WalletAddress,
-    price_service: &PriceService,
+    price_service: &mut PriceService,
     price_cache: &mut HashMap<String, f64>,
     no_prices: bool,
 ) -> Result<evm::AccountBalances> {
@@ -846,7 +876,7 @@ async fn query_and_display_near(
     name: &str,
     address: &str,
     chain: &Chain,
-    _price_service: &PriceService,
+    _price_service: &mut PriceService,
     _price_cache: &mut HashMap<String, f64>
 ) -> Result<near::AccountBalances> {
     match client.get_balances(address).await {
@@ -871,7 +901,7 @@ async fn query_and_display_aptos(
     name: &str,
     address: &str,
     chain: &Chain,
-    _price_service: &PriceService,
+    _price_service: &mut PriceService,
     _price_cache: &mut HashMap<String, f64>
 ) -> Result<aptos::AccountBalances> {
     match client.get_balances(address).await {
@@ -896,7 +926,7 @@ async fn query_and_display_sui(
     name: &str,
     address: &str,
     chain: &Chain,
-    _price_service: &PriceService,
+    _price_service: &mut PriceService,
     _price_cache: &mut HashMap<String, f64>
 ) -> Result<sui::AccountBalances> {
     match client.get_balances(address).await {
@@ -921,7 +951,7 @@ async fn query_and_display_starknet(
     name: &str,
     address: &str,
     chain: &Chain,
-    _price_service: &PriceService,
+    _price_service: &mut PriceService,
     _price_cache: &mut HashMap<String, f64>
 ) -> Result<starknet::AccountBalances> {
     match client.get_balances(address).await {
