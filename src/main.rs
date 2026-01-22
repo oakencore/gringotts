@@ -178,8 +178,8 @@ async fn main() -> Result<()> {
         Commands::ExportTransactions { name, format, start, end, output } => {
             export_transactions(name, format, start, end, output).await?;
         }
-        Commands::Serve { port, refresh_interval, eager } => {
-            web::start_server(port, refresh_interval, eager).await?;
+        Commands::Serve { port, refresh_interval, eager, api_key } => {
+            web::start_server(port, refresh_interval, eager, api_key).await?;
         }
     }
 

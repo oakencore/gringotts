@@ -145,5 +145,10 @@ pub enum Commands {
         /// Without this flag, server starts immediately and serves cached/empty data until first scheduled refresh (lazy mode).
         #[arg(short, long)]
         eager: bool,
+
+        /// API key for authentication. Overrides GRINGOTTS_API_KEY env var.
+        /// If not set, all requests are allowed (for local/trusted networks).
+        #[arg(short = 'k', long)]
+        api_key: Option<String>,
     },
 }

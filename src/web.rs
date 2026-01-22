@@ -12,9 +12,10 @@ use crate::sui::SuiClient;
 
 use askama::Template;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
-    response::{Html, IntoResponse},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Form, Router,
 };
@@ -179,6 +180,52 @@ struct AddAccountForm {
 #[derive(Clone)]
 pub struct AppState {
     pub cache: SharedCache,
+    pub api_key: Option<String>,
+}
+
+/// Query parameters for API key authentication
+#[derive(Deserialize)]
+struct ApiKeyQuery {
+    api_key: Option<String>,
+}
+
+/// Middleware to validate API key authentication.
+/// Checks X-API-Key header first, then ?api_key= query parameter.
+/// Returns 401 Unauthorized if key is required but missing/invalid.
+/// If no key is configured on the server, all requests are allowed.
+async fn api_key_auth(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ApiKeyQuery>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // If no API key is configured, allow all requests
+    let expected_key = match &state.api_key {
+        Some(key) => key,
+        None => return next.run(request).await,
+    };
+
+    // Check X-API-Key header first
+    let header_key = request
+        .headers()
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Use header key if present, otherwise fall back to query parameter
+    let provided_key = header_key.or(query.api_key);
+
+    match provided_key {
+        Some(key) if key == *expected_key => next.run(request).await,
+        Some(_) => (
+            StatusCode::UNAUTHORIZED,
+            "Invalid API key",
+        ).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            "API key required. Provide via X-API-Key header or ?api_key= query parameter.",
+        ).into_response(),
+    }
 }
 
 /// Default refresh interval: 4 hours
@@ -250,9 +297,24 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bool) -> anyhow::Result<()> {
+/// Resolve the API key from CLI flag or environment variable.
+/// Priority: CLI flag > GRINGOTTS_API_KEY env var
+fn resolve_api_key(cli_api_key: Option<String>) -> Option<String> {
+    // CLI flag takes priority
+    if cli_api_key.is_some() {
+        return cli_api_key;
+    }
+
+    // Check environment variable
+    std::env::var("GRINGOTTS_API_KEY").ok()
+}
+
+pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bool, api_key: Option<String>) -> anyhow::Result<()> {
     // Resolve refresh interval
     let interval = resolve_refresh_interval(refresh_interval)?;
+
+    // Resolve API key from CLI or env var
+    let api_key = resolve_api_key(api_key);
     let interval_display = format_duration(interval);
 
     // Load address book to verify it exists
@@ -264,7 +326,14 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
     let cache = SharedCache::new();
     let cache_age = cache.read().await.cache_age_string();
 
-    let state = Arc::new(AppState { cache });
+    // Determine if authentication is enabled
+    let auth_status = if api_key.is_some() {
+        "enabled (X-API-Key header or ?api_key= required)"
+    } else {
+        "disabled (all requests allowed)"
+    };
+
+    let state = Arc::new(AppState { cache, api_key });
 
     // Determine startup mode description
     let startup_mode = if eager { "eager (fetching balances now)" } else { "lazy (serving cached data)" };
@@ -277,27 +346,29 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
         .route("/api/cache/status", get(cache_status))
+        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
         .with_state(state.clone());
 
     // Bind to 0.0.0.0 to accept connections from local network
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    println!("\n╔═══════════════════════════════════════════════════════════════╗");
-    println!("║          Gringotts Web Server Started                        ║");
-    println!("╠═══════════════════════════════════════════════════════════════╣");
-    println!("║  Local:          http://localhost:{}                       ║", port);
-    println!("║  Network:        http://<your-ip>:{}                      ║", port);
-    println!("╠═══════════════════════════════════════════════════════════════╣");
-    println!("║  Address Book:   {} wallets, {} bank accounts              ║", wallet_count, bank_count);
-    println!("║  Cache:          ~/.gringotts/cache.json                    ║");
-    println!("║  Last refresh:   {:>42} ║", cache_age);
-    println!("║  Refresh every:  {:>42} ║", interval_display);
-    println!("║  Startup mode:   {:>42} ║", startup_mode);
-    println!("╠═══════════════════════════════════════════════════════════════╣");
-    println!("║  To find your IP address:                                    ║");
-    println!("║    macOS/Linux:  ifconfig | grep 'inet '                    ║");
-    println!("║    Windows:      ipconfig                                    ║");
-    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+    println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
+    println!("║                    Gringotts Web Server Started                          ║");
+    println!("╠═══════════════════════════════════════════════════════════════════════════╣");
+    println!("║  Local:          http://localhost:{}                                   ║", port);
+    println!("║  Network:        http://<your-ip>:{}                                  ║", port);
+    println!("╠═══════════════════════════════════════════════════════════════════════════╣");
+    println!("║  Address Book:   {} wallets, {} bank accounts                          ║", wallet_count, bank_count);
+    println!("║  Cache:          ~/.gringotts/cache.json                                ║");
+    println!("║  Last refresh:   {:>54} ║", cache_age);
+    println!("║  Refresh every:  {:>54} ║", interval_display);
+    println!("║  Startup mode:   {:>54} ║", startup_mode);
+    println!("║  Authentication: {:>54} ║", auth_status);
+    println!("╠═══════════════════════════════════════════════════════════════════════════╣");
+    println!("║  To find your IP address:                                                ║");
+    println!("║    macOS/Linux:  ifconfig | grep 'inet '                                ║");
+    println!("║    Windows:      ipconfig                                                ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
 
     // If eager mode, perform initial refresh before starting the server
     if eager {
@@ -1774,12 +1845,53 @@ mod tests {
     fn test_resolve_refresh_interval_cli_overrides_env() {
         // Set env var
         std::env::set_var("GRINGOTTS_REFRESH_INTERVAL", "2h");
-        
+
         // CLI should override
         let result = resolve_refresh_interval(Some("30m".to_string())).unwrap();
         assert_eq!(result, Duration::from_secs(30 * 60));
-        
+
         // Clean up
         std::env::remove_var("GRINGOTTS_REFRESH_INTERVAL");
+    }
+
+    #[test]
+    fn test_resolve_api_key_cli_priority() {
+        // CLI flag should take priority
+        let result = resolve_api_key(Some("cli-key".to_string()));
+        assert_eq!(result, Some("cli-key".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_api_key_env_var() {
+        // Set env var
+        std::env::set_var("GRINGOTTS_API_KEY", "env-key");
+
+        let result = resolve_api_key(None);
+        assert_eq!(result, Some("env-key".to_string()));
+
+        // Clean up
+        std::env::remove_var("GRINGOTTS_API_KEY");
+    }
+
+    #[test]
+    fn test_resolve_api_key_cli_overrides_env() {
+        // Set env var
+        std::env::set_var("GRINGOTTS_API_KEY", "env-key");
+
+        // CLI should override
+        let result = resolve_api_key(Some("cli-key".to_string()));
+        assert_eq!(result, Some("cli-key".to_string()));
+
+        // Clean up
+        std::env::remove_var("GRINGOTTS_API_KEY");
+    }
+
+    #[test]
+    fn test_resolve_api_key_none() {
+        // Clear any env var that might be set
+        std::env::remove_var("GRINGOTTS_API_KEY");
+
+        let result = resolve_api_key(None);
+        assert_eq!(result, None);
     }
 }
