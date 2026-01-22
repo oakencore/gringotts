@@ -181,6 +181,7 @@ struct AddAccountForm {
 pub struct AppState {
     pub cache: SharedCache,
     pub api_key: Option<String>,
+    pub refresh_interval_secs: u64,
 }
 
 /// Query parameters for API key authentication
@@ -333,12 +334,13 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         "disabled (all requests allowed)"
     };
 
-    let state = Arc::new(AppState { cache, api_key });
+    let state = Arc::new(AppState { cache, api_key, refresh_interval_secs: interval.as_secs() });
 
     // Determine startup mode description
     let startup_mode = if eager { "eager (fetching balances now)" } else { "lazy (serving cached data)" };
 
-    let app = Router::new()
+    // Routes that require authentication
+    let protected_routes = Router::new()
         .route("/", get(index))
         .route("/accounts", post(add_account))
         .route("/accounts/:name", delete(remove_account))
@@ -346,7 +348,15 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
         .route("/api/cache/status", get(cache_status))
-        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
+        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
+
+    // Public routes (no authentication required)
+    let public_routes = Router::new()
+        .route("/health", get(health_check));
+
+    let app = Router::new()
+        .merge(protected_routes)
+        .merge(public_routes)
         .with_state(state.clone());
 
     // Bind to 0.0.0.0 to accept connections from local network
@@ -642,6 +652,41 @@ async fn cache_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "cached_balances": cache.balances.len(),
         "cached_prices": cache.prices.data.len(),
     });
+    (StatusCode::OK, axum::Json(status))
+}
+
+/// Health check endpoint - no authentication required.
+/// Returns server status, last refresh time, and next scheduled refresh.
+async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cache = state.cache.read().await;
+
+    // Calculate time until next refresh based on last refresh timestamp
+    let (last_refresh_iso, next_refresh_in) = match cache.last_full_refresh {
+        Some(last_ts) => {
+            // Format last refresh as ISO 8601
+            let last_dt = chrono::DateTime::from_timestamp(last_ts as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Calculate seconds until next refresh
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed = now.saturating_sub(last_ts);
+            let next_in = state.refresh_interval_secs.saturating_sub(elapsed);
+
+            (last_dt, format_duration(Duration::from_secs(next_in)))
+        }
+        None => ("never".to_string(), format_duration(Duration::from_secs(state.refresh_interval_secs))),
+    };
+
+    let status = serde_json::json!({
+        "status": "healthy",
+        "last_refresh": last_refresh_iso,
+        "next_refresh_in": next_refresh_in,
+    });
+
     (StatusCode::OK, axum::Json(status))
 }
 
@@ -1893,5 +1938,50 @@ mod tests {
 
         let result = resolve_api_key(None);
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_response() {
+        use crate::cache::SharedCache;
+        use axum::extract::State;
+
+        // Create app state with fresh cache
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            refresh_interval_secs: 3600, // 1 hour
+        });
+
+        // Call health check
+        let response = health_check(State(state)).await;
+        let (status, _body) = response.into_response().into_parts();
+
+        // Status should be OK (200)
+        assert_eq!(status.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_with_refresh() {
+        use crate::cache::SharedCache;
+        use axum::extract::State;
+
+        // Create app state with fresh cache
+        let cache = SharedCache::new();
+
+        // Mark a refresh
+        cache.mark_refresh().await.unwrap();
+
+        let state = Arc::new(AppState {
+            cache,
+            api_key: None,
+            refresh_interval_secs: 3600, // 1 hour
+        });
+
+        // Call health check
+        let response = health_check(State(state)).await;
+        let (status, _body) = response.into_response().into_parts();
+
+        // Status should be OK (200)
+        assert_eq!(status.status, StatusCode::OK);
     }
 }
