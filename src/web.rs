@@ -348,6 +348,7 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
         .route("/api/balances", get(get_balances_json))
+        .route("/api/balances/company/:company", get(get_company_balances_json))
         .route("/api/balances/:address", get(get_single_balance_json))
         .route("/api/cache/status", get(cache_status))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
@@ -870,6 +871,168 @@ async fn get_single_balance_json(
 
     let mut companies: HashMap<String, serde_json::Value> = HashMap::new();
     companies.insert(company.clone(), company_data);
+
+    // Format last refresh timestamp as ISO 8601
+    let last_refresh_iso = match cache.last_full_refresh {
+        Some(ts) => chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        None => "never".to_string(),
+    };
+
+    // Get current timestamp
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let response = serde_json::json!({
+        "timestamp": timestamp,
+        "last_refresh": last_refresh_iso,
+        "total_usd_value": company_total,
+        "companies": companies
+    });
+
+    (StatusCode::OK, axum::Json(response))
+}
+
+/// API endpoint to get balances for all wallets tagged with a specific company.
+/// Returns 404 if no wallets have that company tag.
+/// Returns nested structure with company total and all wallets.
+async fn get_company_balances_json(
+    State(state): State<Arc<AppState>>,
+    Path(company_param): Path<String>,
+) -> impl IntoResponse {
+    // Load address book to find wallets with matching company tag
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    // Normalize company name comparison (case-insensitive)
+    let company_lower = company_param.to_lowercase();
+
+    // Find all wallet names belonging to this company
+    let mut wallet_names: Vec<String> = book
+        .addresses
+        .iter()
+        .filter(|w| {
+            let wallet_company = if w.company.is_empty() {
+                "uncategorized"
+            } else {
+                &w.company
+            };
+            wallet_company.to_lowercase() == company_lower
+        })
+        .map(|w| w.name.clone())
+        .collect();
+
+    // Also include banking accounts with matching company
+    let banking_names: Vec<String> = book
+        .banking_accounts
+        .iter()
+        .filter(|a| {
+            let account_company = if a.company.is_empty() {
+                "uncategorized"
+            } else {
+                &a.company
+            };
+            account_company.to_lowercase() == company_lower
+        })
+        .map(|a| a.name.clone())
+        .collect();
+
+    wallet_names.extend(banking_names);
+
+    // Return 404 if no wallets found for this company
+    if wallet_names.is_empty() {
+        let error = serde_json::json!({
+            "error": format!("No wallets found with company tag '{}'", company_param)
+        });
+        return (StatusCode::NOT_FOUND, axum::Json(error));
+    }
+
+    let cache = state.cache.read().await;
+
+    // Build wallets map for this company
+    let mut wallets: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut company_total: f64 = 0.0;
+
+    for name in &wallet_names {
+        if let Some(entry) = cache.balances.get(name) {
+            let balance = &entry.data;
+
+            // Build token list
+            let tokens: Vec<serde_json::Value> = balance
+                .tokens
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "symbol": t.symbol,
+                        "balance": t.balance,
+                        "usd_value": t.usd_value
+                    })
+                })
+                .collect();
+
+            // Build wallet entry
+            let wallet_data = serde_json::json!({
+                "address": balance.address_or_id,
+                "chain": balance.chain_or_service,
+                "native": {
+                    "symbol": balance.native_symbol,
+                    "balance": balance.native_balance,
+                    "usd_value": balance.native_usd_value
+                },
+                "tokens": tokens,
+                "total_usd_value": balance.total_usd_value
+            });
+
+            // Add to company total
+            if let Some(usd) = balance.total_usd_value {
+                company_total += usd;
+            }
+
+            wallets.insert(name.clone(), wallet_data);
+        }
+    }
+
+    // Use the original company name from the first matching wallet for display
+    let display_company = book
+        .addresses
+        .iter()
+        .find(|w| w.company.to_lowercase() == company_lower)
+        .map(|w| {
+            if w.company.is_empty() {
+                "Uncategorized".to_string()
+            } else {
+                w.company.clone()
+            }
+        })
+        .or_else(|| {
+            book.banking_accounts
+                .iter()
+                .find(|a| a.company.to_lowercase() == company_lower)
+                .map(|a| {
+                    if a.company.is_empty() {
+                        "Uncategorized".to_string()
+                    } else {
+                        a.company.clone()
+                    }
+                })
+        })
+        .unwrap_or(company_param.clone());
+
+    // Build company data
+    let company_data = serde_json::json!({
+        "wallets": wallets,
+        "total_usd_value": company_total
+    });
+
+    let mut companies: HashMap<String, serde_json::Value> = HashMap::new();
+    companies.insert(display_company, company_data);
 
     // Format last refresh timestamp as ISO 8601
     let last_refresh_iso = match cache.last_full_refresh {
