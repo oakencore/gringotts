@@ -347,6 +347,8 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/balances", get(query_balances))
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
+        .route("/api/wallets", get(get_wallets_json))
+        .route("/api/companies", get(get_companies_json))
         .route("/api/balances", get(get_balances_json))
         .route("/api/balances/company/:company", get(get_company_balances_json))
         .route("/api/balances/:address", get(get_single_balance_json))
@@ -1437,6 +1439,125 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     });
 
     (StatusCode::OK, axum::Json(status))
+}
+
+/// API endpoint to list all tracked wallet addresses with metadata.
+/// Returns wallet name, address, chain, and company tag for each tracked wallet.
+async fn get_wallets_json() -> impl IntoResponse {
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    let wallets: Vec<serde_json::Value> = book
+        .addresses
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "name": w.name,
+                "address": w.address,
+                "chain": w.chain.display_name(),
+                "company": if w.company.is_empty() { None } else { Some(&w.company) }
+            })
+        })
+        .collect();
+
+    let banking_accounts: Vec<serde_json::Value> = book
+        .banking_accounts
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "name": a.name,
+                "account_id": a.account_id,
+                "service": a.service.display_name(),
+                "company": if a.company.is_empty() { None } else { Some(&a.company) }
+            })
+        })
+        .collect();
+
+    let response = serde_json::json!({
+        "wallets": wallets,
+        "banking_accounts": banking_accounts,
+        "total_wallets": wallets.len(),
+        "total_banking_accounts": banking_accounts.len()
+    });
+
+    (StatusCode::OK, axum::Json(response))
+}
+
+/// API endpoint to list all unique company tags.
+/// Returns sorted list of company names with wallet counts.
+async fn get_companies_json() -> impl IntoResponse {
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    // Count wallets and banking accounts per company
+    let mut company_counts: HashMap<String, (usize, usize)> = HashMap::new();
+
+    for wallet in &book.addresses {
+        let company = if wallet.company.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            wallet.company.clone()
+        };
+        let entry = company_counts.entry(company).or_insert((0, 0));
+        entry.0 += 1;
+    }
+
+    for account in &book.banking_accounts {
+        let company = if account.company.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            account.company.clone()
+        };
+        let entry = company_counts.entry(company).or_insert((0, 0));
+        entry.1 += 1;
+    }
+
+    // Convert to sorted list
+    let mut companies: Vec<serde_json::Value> = company_counts
+        .into_iter()
+        .map(|(name, (wallet_count, banking_count))| {
+            serde_json::json!({
+                "name": name,
+                "wallet_count": wallet_count,
+                "banking_account_count": banking_count,
+                "total_accounts": wallet_count + banking_count
+            })
+        })
+        .collect();
+
+    // Sort alphabetically, but put "Uncategorized" last
+    companies.sort_by(|a, b| {
+        let name_a = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let name_b = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name_a == "Uncategorized" {
+            std::cmp::Ordering::Greater
+        } else if name_b == "Uncategorized" {
+            std::cmp::Ordering::Less
+        } else {
+            name_a.cmp(name_b)
+        }
+    });
+
+    let response = serde_json::json!({
+        "companies": companies,
+        "total_companies": companies.len()
+    });
+
+    (StatusCode::OK, axum::Json(response))
 }
 
 async fn index() -> impl IntoResponse {
