@@ -7,6 +7,7 @@ use crate::solana;
 use crate::starknet;
 use crate::storage::{BankingAccount, BankingService, Chain, WalletAddress};
 use crate::sui;
+use crate::FetchFailure;
 
 fn format_usd(value: f64) -> String {
     let formatted = format!("{:.2}", value);
@@ -394,7 +395,7 @@ pub fn render_evm_balances(company: &str, name: &str, address: &str, balances: &
     println!("╚{}╝\n", "═".repeat(box_width + 2));
 }
 
-pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
+pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary, price_info: Option<&str>) {
     const BOX_WIDTH: usize = 81;
 
     println!("\n╔═════════════════════════════════════════════════════════════════════════════════╗");
@@ -406,6 +407,13 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary) {
     let total_value_len = total_value_str.len();
     let total_padding = (BOX_WIDTH - 2).saturating_sub(total_value_len);
     println!("║  {}{:width$} ║", total_value_str, "", width = total_padding);
+
+    // Show price cache info if present
+    if let Some(info) = price_info {
+        let info_len = info.len();
+        let info_padding = (BOX_WIDTH - 2).saturating_sub(info_len);
+        println!("║  {}{:width$} ║", info, "", width = info_padding);
+    }
 
     if portfolio.companies.is_empty() {
         println!("╠═════════════════════════════════════════════════════════════════════════════════╣");
@@ -654,6 +662,48 @@ pub fn render_circle_balances(company: &str, name: &str, balances: &circle::Acco
     // Print remaining lines
     for line in lines.iter().skip(3) {
         println!("║  {:<width$} ║", line, width = box_width);
+    }
+
+    println!("╚{}╝\n", "═".repeat(box_width + 2));
+}
+
+/// Renders a summary of failed wallet/account queries
+pub fn render_fetch_failures(failures: &[FetchFailure]) {
+    if failures.is_empty() {
+        return;
+    }
+
+    const MIN_WIDTH: usize = 60;
+    let mut lines = Vec::new();
+
+    lines.push(format!("FAILED QUERIES ({} total)", failures.len()));
+    lines.push(String::new());
+
+    for failure in failures {
+        lines.push(format!("  {} ({})", failure.name, failure.chain_or_service));
+        // Truncate error message if too long
+        let error_display = if failure.error.len() > 50 {
+            format!("{}...", &failure.error[..47])
+        } else {
+            failure.error.clone()
+        };
+        lines.push(format!("    Error: {}", error_display));
+    }
+
+    lines.push(String::new());
+    lines.push("Note: Cached data preserved for failed queries".to_string());
+
+    let max_content_width = lines.iter().map(|l| l.len()).max().unwrap_or(MIN_WIDTH);
+    let box_width = max_content_width.max(MIN_WIDTH);
+
+    println!("\n╔{}╗", "═".repeat(box_width + 2));
+
+    for line in &lines {
+        if line.is_empty() {
+            println!("║  {:width$} ║", "", width = box_width);
+        } else {
+            println!("║  {:<width$} ║", line, width = box_width);
+        }
     }
 
     println!("╚{}╝\n", "═".repeat(box_width + 2));

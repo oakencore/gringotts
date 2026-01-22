@@ -443,7 +443,10 @@ async fn background_refresh_task(state: Arc<AppState>, interval: Duration) {
     }
 }
 
-/// Refresh all balances and update the cache
+/// Refresh all balances and update the cache.
+/// Uses graceful partial failure handling: failed wallet queries are logged
+/// but do not halt the refresh process. Cached data is preserved for wallets
+/// that fail to query (only successful queries update the cache).
 async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
     let book = AddressBook::load()?;
 
@@ -452,118 +455,19 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
 
     let mut all_symbols: HashSet<String> = HashSet::new();
+    let mut success_count: usize = 0;
+    let mut failure_count: usize = 0;
+    let total_items = book.addresses.len() + book.banking_accounts.len();
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
 
     // Query crypto wallets
     for wallet in &book.addresses {
         match &wallet.chain {
             Chain::Solana => {
                 let client = SolanaClient::new(None);
-                if let Ok(balances) = client.get_balances(&wallet.address) {
-                    all_symbols.insert("SOL".to_string());
-                    let mut cached_tokens = vec![];
-                    for token in &balances.token_balances {
-                        if let Some(symbol) = &token.symbol {
-                            all_symbols.insert(symbol.clone());
-                            cached_tokens.push(CachedToken {
-                                symbol: symbol.clone(),
-                                balance: token.ui_amount,
-                                usd_value: token.usd_value,
-                            });
-                        }
-                    }
-                    let cached_balance = CachedBalance {
-                        name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
-                        chain_or_service: wallet.chain.display_name().to_string(),
-                        native_symbol: "SOL".to_string(),
-                        native_balance: balances.sol_balance,
-                        native_usd_value: balances.sol_usd_value,
-                        tokens: cached_tokens,
-                        total_usd_value: balances.total_usd_value,
-                    };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
-                }
-            }
-            Chain::Near => {
-                let client = NearClient::new(None);
-                if let Ok(balances) = client.get_balances(&wallet.address).await {
-                    all_symbols.insert("NEAR".to_string());
-                    let cached_balance = CachedBalance {
-                        name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
-                        chain_or_service: wallet.chain.display_name().to_string(),
-                        native_symbol: "NEAR".to_string(),
-                        native_balance: balances.near_balance,
-                        native_usd_value: balances.near_usd_value,
-                        tokens: vec![],
-                        total_usd_value: balances.total_usd_value,
-                    };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
-                }
-            }
-            Chain::Aptos => {
-                let client = AptosClient::new(None);
-                if let Ok(balances) = client.get_balances(&wallet.address).await {
-                    all_symbols.insert("APT".to_string());
-                    let cached_balance = CachedBalance {
-                        name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
-                        chain_or_service: wallet.chain.display_name().to_string(),
-                        native_symbol: "APT".to_string(),
-                        native_balance: balances.apt_balance,
-                        native_usd_value: balances.apt_usd_value,
-                        tokens: vec![],
-                        total_usd_value: balances.total_usd_value,
-                    };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
-                }
-            }
-            Chain::Sui => {
-                let client = SuiClient::new(None);
-                if let Ok(balances) = client.get_balances(&wallet.address).await {
-                    all_symbols.insert("SUI".to_string());
-                    let cached_balance = CachedBalance {
-                        name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
-                        chain_or_service: wallet.chain.display_name().to_string(),
-                        native_symbol: "SUI".to_string(),
-                        native_balance: balances.sui_balance,
-                        native_usd_value: balances.sui_usd_value,
-                        tokens: vec![],
-                        total_usd_value: balances.total_usd_value,
-                    };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
-                }
-            }
-            Chain::Starknet => {
-                let client = StarknetClient::new(None);
-                if let Ok(balances) = client.get_balances(&wallet.address).await {
-                    all_symbols.insert("ETH".to_string());
-                    let cached_balance = CachedBalance {
-                        name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
-                        chain_or_service: wallet.chain.display_name().to_string(),
-                        native_symbol: "ETH".to_string(),
-                        native_balance: balances.eth_balance,
-                        native_usd_value: balances.eth_usd_value,
-                        tokens: vec![],
-                        total_usd_value: balances.total_usd_value,
-                    };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
-                }
-            }
-            Chain::Ethereum
-            | Chain::Polygon
-            | Chain::BinanceSmartChain
-            | Chain::Arbitrum
-            | Chain::Optimism
-            | Chain::Avalanche
-            | Chain::Base
-            | Chain::Core => {
-                if let Ok(client) = EvmClient::new(None, wallet.chain.clone()) {
-                    if let Ok(balances) = client.get_balances(&wallet.address).await {
-                        let native_symbol = wallet.chain.native_token_symbol();
-                        all_symbols.insert(native_symbol.to_string());
+                match client.get_balances(&wallet.address) {
+                    Ok(balances) => {
+                        all_symbols.insert("SOL".to_string());
                         let mut cached_tokens = vec![];
                         for token in &balances.token_balances {
                             if let Some(symbol) = &token.symbol {
@@ -579,13 +483,164 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                             name: wallet.name.clone(),
                             address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
-                            native_symbol: native_symbol.to_string(),
-                            native_balance: balances.eth_balance,
-                            native_usd_value: balances.eth_usd_value,
+                            native_symbol: "SOL".to_string(),
+                            native_balance: balances.sol_balance,
+                            native_usd_value: balances.sol_usd_value,
                             tokens: cached_tokens,
                             total_usd_value: balances.total_usd_value,
                         };
                         let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        failure_count += 1;
+                    }
+                }
+            }
+            Chain::Near => {
+                let client = NearClient::new(None);
+                match client.get_balances(&wallet.address).await {
+                    Ok(balances) => {
+                        all_symbols.insert("NEAR".to_string());
+                        let cached_balance = CachedBalance {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            native_symbol: "NEAR".to_string(),
+                            native_balance: balances.near_balance,
+                            native_usd_value: balances.near_usd_value,
+                            tokens: vec![],
+                            total_usd_value: balances.total_usd_value,
+                        };
+                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        failure_count += 1;
+                    }
+                }
+            }
+            Chain::Aptos => {
+                let client = AptosClient::new(None);
+                match client.get_balances(&wallet.address).await {
+                    Ok(balances) => {
+                        all_symbols.insert("APT".to_string());
+                        let cached_balance = CachedBalance {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            native_symbol: "APT".to_string(),
+                            native_balance: balances.apt_balance,
+                            native_usd_value: balances.apt_usd_value,
+                            tokens: vec![],
+                            total_usd_value: balances.total_usd_value,
+                        };
+                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        failure_count += 1;
+                    }
+                }
+            }
+            Chain::Sui => {
+                let client = SuiClient::new(None);
+                match client.get_balances(&wallet.address).await {
+                    Ok(balances) => {
+                        all_symbols.insert("SUI".to_string());
+                        let cached_balance = CachedBalance {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            native_symbol: "SUI".to_string(),
+                            native_balance: balances.sui_balance,
+                            native_usd_value: balances.sui_usd_value,
+                            tokens: vec![],
+                            total_usd_value: balances.total_usd_value,
+                        };
+                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        failure_count += 1;
+                    }
+                }
+            }
+            Chain::Starknet => {
+                let client = StarknetClient::new(None);
+                match client.get_balances(&wallet.address).await {
+                    Ok(balances) => {
+                        all_symbols.insert("ETH".to_string());
+                        let cached_balance = CachedBalance {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            native_symbol: "ETH".to_string(),
+                            native_balance: balances.eth_balance,
+                            native_usd_value: balances.eth_usd_value,
+                            tokens: vec![],
+                            total_usd_value: balances.total_usd_value,
+                        };
+                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        failure_count += 1;
+                    }
+                }
+            }
+            Chain::Ethereum
+            | Chain::Polygon
+            | Chain::BinanceSmartChain
+            | Chain::Arbitrum
+            | Chain::Optimism
+            | Chain::Avalanche
+            | Chain::Base
+            | Chain::Core => {
+                match EvmClient::new(None, wallet.chain.clone()) {
+                    Ok(client) => {
+                        match client.get_balances(&wallet.address).await {
+                            Ok(balances) => {
+                                let native_symbol = wallet.chain.native_token_symbol();
+                                all_symbols.insert(native_symbol.to_string());
+                                let mut cached_tokens = vec![];
+                                for token in &balances.token_balances {
+                                    if let Some(symbol) = &token.symbol {
+                                        all_symbols.insert(symbol.clone());
+                                        cached_tokens.push(CachedToken {
+                                            symbol: symbol.clone(),
+                                            balance: token.ui_amount,
+                                            usd_value: token.usd_value,
+                                        });
+                                    }
+                                }
+                                let cached_balance = CachedBalance {
+                                    name: wallet.name.clone(),
+                                    address_or_id: wallet.address.clone(),
+                                    chain_or_service: wallet.chain.display_name().to_string(),
+                                    native_symbol: native_symbol.to_string(),
+                                    native_balance: balances.eth_balance,
+                                    native_usd_value: balances.eth_usd_value,
+                                    tokens: cached_tokens,
+                                    total_usd_value: balances.total_usd_value,
+                                };
+                                let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                                success_count += 1;
+                            }
+                            Err(e) => {
+                                eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                                failure_count += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to create EVM client for {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        failure_count += 1;
                     }
                 }
             }
@@ -596,64 +651,103 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
     for account in &book.banking_accounts {
         match &account.service {
             BankingService::Mercury => {
-                if let Ok(client) = MercuryClient::new() {
-                    if let Ok(balances) = client.get_account_balance(&account.account_id).await {
-                        let cached_balance = CachedBalance {
-                            name: account.name.clone(),
-                            address_or_id: account.account_id.clone(),
-                            chain_or_service: "Mercury Banking".to_string(),
-                            native_symbol: "USD".to_string(),
-                            native_balance: balances.current_balance,
-                            native_usd_value: Some(balances.current_balance),
-                            tokens: vec![],
-                            total_usd_value: Some(balances.current_balance),
-                        };
-                        let _ = state.cache.update_balance(&account.name, cached_balance).await;
+                match MercuryClient::new() {
+                    Ok(client) => {
+                        match client.get_account_balance(&account.account_id).await {
+                            Ok(balances) => {
+                                let cached_balance = CachedBalance {
+                                    name: account.name.clone(),
+                                    address_or_id: account.account_id.clone(),
+                                    chain_or_service: "Mercury Banking".to_string(),
+                                    native_symbol: "USD".to_string(),
+                                    native_balance: balances.current_balance,
+                                    native_usd_value: Some(balances.current_balance),
+                                    tokens: vec![],
+                                    total_usd_value: Some(balances.current_balance),
+                                };
+                                let _ = state.cache.update_balance(&account.name, cached_balance).await;
+                                success_count += 1;
+                            }
+                            Err(e) => {
+                                eprintln!("[{}] Warning: Failed to query {} (Mercury): {}", timestamp, account.name, e);
+                                failure_count += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to initialize Mercury client: {}", timestamp, e);
+                        failure_count += 1;
                     }
                 }
             }
             BankingService::Circle => {
-                if let Ok(client) = CircleClient::new() {
-                    if let Ok(balances) = client.get_balances().await {
-                        let mut cached_tokens = vec![];
-                        let mut total_usd = 0.0;
-                        for balance in &balances.available_balances {
-                            let symbol = match balance.currency.as_str() {
-                                "USD" => "USDC",
-                                "EUR" => "EURC",
-                                _ => &balance.currency,
-                            };
-                            if balance.currency == "USD" {
-                                total_usd += balance.amount;
+                match CircleClient::new() {
+                    Ok(client) => {
+                        match client.get_balances().await {
+                            Ok(balances) => {
+                                let mut cached_tokens = vec![];
+                                let mut total_usd = 0.0;
+                                for balance in &balances.available_balances {
+                                    let symbol = match balance.currency.as_str() {
+                                        "USD" => "USDC",
+                                        "EUR" => "EURC",
+                                        _ => &balance.currency,
+                                    };
+                                    if balance.currency == "USD" {
+                                        total_usd += balance.amount;
+                                    }
+                                    cached_tokens.push(CachedToken {
+                                        symbol: symbol.to_string(),
+                                        balance: balance.amount,
+                                        usd_value: if balance.currency == "USD" { Some(balance.amount) } else { None },
+                                    });
+                                }
+                                let cached_balance = CachedBalance {
+                                    name: account.name.clone(),
+                                    address_or_id: account.account_id.clone(),
+                                    chain_or_service: "Circle".to_string(),
+                                    native_symbol: "USD".to_string(),
+                                    native_balance: total_usd,
+                                    native_usd_value: Some(total_usd),
+                                    tokens: cached_tokens,
+                                    total_usd_value: Some(total_usd),
+                                };
+                                let _ = state.cache.update_balance(&account.name, cached_balance).await;
+                                success_count += 1;
                             }
-                            cached_tokens.push(CachedToken {
-                                symbol: symbol.to_string(),
-                                balance: balance.amount,
-                                usd_value: if balance.currency == "USD" { Some(balance.amount) } else { None },
-                            });
+                            Err(e) => {
+                                eprintln!("[{}] Warning: Failed to query {} (Circle): {}", timestamp, account.name, e);
+                                failure_count += 1;
+                            }
                         }
-                        let cached_balance = CachedBalance {
-                            name: account.name.clone(),
-                            address_or_id: account.account_id.clone(),
-                            chain_or_service: "Circle".to_string(),
-                            native_symbol: "USD".to_string(),
-                            native_balance: total_usd,
-                            native_usd_value: Some(total_usd),
-                            tokens: cached_tokens,
-                            total_usd_value: Some(total_usd),
-                        };
-                        let _ = state.cache.update_balance(&account.name, cached_balance).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[{}] Warning: Failed to initialize Circle client: {}", timestamp, e);
+                        failure_count += 1;
                     }
                 }
             }
         }
     }
 
+    // Log summary of refresh results
+    if failure_count > 0 {
+        eprintln!(
+            "[{}] Refresh partial: {} of {} succeeded, {} failed (cached data preserved for failures)",
+            timestamp, success_count, total_items, failure_count
+        );
+    }
+
     // Fetch and cache prices
     if let Ok(mut price_service) = PriceService::new() {
         let symbols: Vec<String> = all_symbols.into_iter().collect();
-        if let Ok(prices) = price_service.batch_fetch_prices(&symbols).await {
-            let _ = state.cache.update_prices(prices).await;
+        match price_service.batch_fetch_prices(&symbols).await {
+            Ok(prices) => {
+                let _ = state.cache.update_prices(prices).await;
+            }
+            Err(e) => {
+                eprintln!("[{}] Warning: Failed to fetch prices: {}", timestamp, e);
+            }
         }
     }
 

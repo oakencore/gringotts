@@ -132,6 +132,21 @@ enum WalletBalances {
     Circle(BankingAccount, circle::AccountBalances),
 }
 
+/// Represents a failed wallet/account query
+#[derive(Debug, Clone)]
+pub struct FetchFailure {
+    pub name: String,
+    pub address_or_id: String,
+    pub chain_or_service: String,
+    pub error: String,
+}
+
+/// Result of fetching all balances - includes successes and failures
+pub struct FetchAllResult {
+    pub balances: Vec<WalletBalances>,
+    pub failures: Vec<FetchFailure>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file if present
@@ -266,10 +281,11 @@ fn remove_address(identifier: String) -> Result<()> {
 }
 
 // Helper function to fetch all balances from wallets and banking accounts
+// Returns both successful balances and tracked failures for partial failure handling
 async fn fetch_all_balances(
     book: &AddressBook,
     rpc_url: Option<String>,
-) -> Vec<WalletBalances> {
+) -> FetchAllResult {
     let total_items = book.addresses.len() + book.banking_accounts.len();
     let pb = ProgressBar::new(total_items as u64);
     pb.set_style(
@@ -281,6 +297,7 @@ async fn fetch_all_balances(
     pb.set_message("Fetching balances...");
 
     let mut all_balances: Vec<WalletBalances> = Vec::new();
+    let mut failures: Vec<FetchFailure> = Vec::new();
 
     // Query blockchain wallets
     for wallet in book.addresses.iter() {
@@ -292,7 +309,14 @@ async fn fetch_all_balances(
                         all_balances.push(WalletBalances::Solana(wallet.clone(), balances));
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        let error_msg = format!("{}", e);
+                        pb.println(format!("Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        failures.push(FetchFailure {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -303,7 +327,14 @@ async fn fetch_all_balances(
                         all_balances.push(WalletBalances::Near(wallet.clone(), balances));
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        let error_msg = format!("{}", e);
+                        pb.println(format!("Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        failures.push(FetchFailure {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -314,7 +345,14 @@ async fn fetch_all_balances(
                         all_balances.push(WalletBalances::Aptos(wallet.clone(), balances));
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        let error_msg = format!("{}", e);
+                        pb.println(format!("Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        failures.push(FetchFailure {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -325,7 +363,14 @@ async fn fetch_all_balances(
                         all_balances.push(WalletBalances::Sui(wallet.clone(), balances));
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        let error_msg = format!("{}", e);
+                        pb.println(format!("Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        failures.push(FetchFailure {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -336,7 +381,14 @@ async fn fetch_all_balances(
                         all_balances.push(WalletBalances::Starknet(wallet.clone(), balances));
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        let error_msg = format!("{}", e);
+                        pb.println(format!("Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                        failures.push(FetchFailure {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -349,11 +401,25 @@ async fn fetch_all_balances(
                             all_balances.push(WalletBalances::Evm(wallet.clone(), balances));
                         }
                         Err(e) => {
-                            pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                            let error_msg = format!("{}", e);
+                            pb.println(format!("Warning: Failed to query {} ({}): {}", wallet.name, wallet.address, e));
+                            failures.push(FetchFailure {
+                                name: wallet.name.clone(),
+                                address_or_id: wallet.address.clone(),
+                                chain_or_service: wallet.chain.display_name().to_string(),
+                                error: error_msg,
+                            });
                         }
                     },
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to create EVM client for {} ({}): {}", wallet.name, wallet.address, e));
+                        let error_msg = format!("Failed to create client: {}", e);
+                        pb.println(format!("Warning: Failed to create EVM client for {} ({}): {}", wallet.name, wallet.address, e));
+                        failures.push(FetchFailure {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -372,12 +438,26 @@ async fn fetch_all_balances(
                                 all_balances.push(WalletBalances::Mercury(account.clone(), balances));
                             }
                             Err(e) => {
-                                pb.println(format!("⚠ Warning: Failed to query {} ({}): {}", account.name, account.account_id, e));
+                                let error_msg = format!("{}", e);
+                                pb.println(format!("Warning: Failed to query {} ({}): {}", account.name, account.account_id, e));
+                                failures.push(FetchFailure {
+                                    name: account.name.clone(),
+                                    address_or_id: account.account_id.clone(),
+                                    chain_or_service: account.service.display_name().to_string(),
+                                    error: error_msg,
+                                });
                             }
                         }
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to initialize Mercury client: {}", e));
+                        let error_msg = format!("Failed to initialize client: {}", e);
+                        pb.println(format!("Warning: Failed to initialize Mercury client: {}", e));
+                        failures.push(FetchFailure {
+                            name: account.name.clone(),
+                            address_or_id: account.account_id.clone(),
+                            chain_or_service: account.service.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -389,12 +469,26 @@ async fn fetch_all_balances(
                                 all_balances.push(WalletBalances::Circle(account.clone(), balances));
                             }
                             Err(e) => {
-                                pb.println(format!("⚠ Warning: Failed to query {} Circle balances: {}", account.name, e));
+                                let error_msg = format!("{}", e);
+                                pb.println(format!("Warning: Failed to query {} Circle balances: {}", account.name, e));
+                                failures.push(FetchFailure {
+                                    name: account.name.clone(),
+                                    address_or_id: account.account_id.clone(),
+                                    chain_or_service: account.service.display_name().to_string(),
+                                    error: error_msg,
+                                });
                             }
                         }
                     }
                     Err(e) => {
-                        pb.println(format!("⚠ Warning: Failed to initialize Circle client: {}", e));
+                        let error_msg = format!("Failed to initialize client: {}", e);
+                        pb.println(format!("Warning: Failed to initialize Circle client: {}", e));
+                        failures.push(FetchFailure {
+                            name: account.name.clone(),
+                            address_or_id: account.account_id.clone(),
+                            chain_or_service: account.service.display_name().to_string(),
+                            error: error_msg,
+                        });
                     }
                 }
             }
@@ -402,10 +496,23 @@ async fn fetch_all_balances(
         pb.inc(1);
     }
 
-    pb.finish_with_message(format!("✓ Successfully fetched balances from {} items", all_balances.len()));
+    // Show summary with success/failure counts
+    let success_count = all_balances.len();
+    let failure_count = failures.len();
+    if failure_count > 0 {
+        pb.finish_with_message(format!(
+            "Fetched {} of {} items ({} failed)",
+            success_count, total_items, failure_count
+        ));
+    } else {
+        pb.finish_with_message(format!("Successfully fetched balances from {} items", success_count));
+    }
     println!();
 
-    all_balances
+    FetchAllResult {
+        balances: all_balances,
+        failures,
+    }
 }
 
 // Helper function to extract unique token symbols from all balances
@@ -581,12 +688,12 @@ async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
         println!("\nQuerying balances for all tracked addresses and accounts...\n");
     }
 
-    // Fetch all balances
-    let all_balances = fetch_all_balances(&book, rpc_url).await;
+    // Fetch all balances (includes partial failure handling)
+    let fetch_result = fetch_all_balances(&book, rpc_url).await;
 
     // Extract symbols and fetch prices (skip if --no-prices)
     let (price_cache, price_info) = if !no_prices {
-        let symbols = extract_token_symbols(&all_balances);
+        let symbols = extract_token_symbols(&fetch_result.balances);
         let result = fetch_prices_for_symbols(symbols).await?;
         let info = if result.from_cache {
             result.cache_age.map(|age| format!("Prices from cache (updated {})", age))
@@ -599,10 +706,15 @@ async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
     };
 
     // Enrich balances with prices and display
-    let portfolio = enrich_and_display_balances(all_balances, &price_cache);
+    let portfolio = enrich_and_display_balances(fetch_result.balances, &price_cache);
 
     // Display portfolio summary with cache info
     ui::render_portfolio_summary(&portfolio, price_info.as_deref());
+
+    // Display failure summary if any
+    if !fetch_result.failures.is_empty() {
+        ui::render_fetch_failures(&fetch_result.failures);
+    }
 
     Ok(())
 }
