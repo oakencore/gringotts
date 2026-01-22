@@ -23,6 +23,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use std::time::Duration;
 
 // Custom filter for formatting USD values
@@ -182,6 +183,10 @@ pub struct AppState {
     pub cache: SharedCache,
     pub api_key: Option<String>,
     pub refresh_interval_secs: u64,
+    /// Timestamp of last manual refresh for rate limiting (Unix seconds)
+    pub last_manual_refresh: Arc<RwLock<Option<u64>>>,
+    /// Whether a refresh is currently in progress
+    pub refresh_in_progress: Arc<RwLock<bool>>,
 }
 
 /// Query parameters for API key authentication
@@ -334,7 +339,13 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         "disabled (all requests allowed)"
     };
 
-    let state = Arc::new(AppState { cache, api_key, refresh_interval_secs: interval.as_secs() });
+    let state = Arc::new(AppState {
+        cache,
+        api_key,
+        refresh_interval_secs: interval.as_secs(),
+        last_manual_refresh: Arc::new(RwLock::new(None)),
+        refresh_in_progress: Arc::new(RwLock::new(false)),
+    });
 
     // Determine startup mode description
     let startup_mode = if eager { "eager (fetching balances now)" } else { "lazy (serving cached data)" };
@@ -355,6 +366,7 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/api/totals", get(get_totals_json))
         .route("/api/totals/company/:company", get(get_company_totals_json))
         .route("/api/cache/status", get(cache_status))
+        .route("/api/refresh", post(manual_refresh))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
 
     // Public routes (no authentication required)
@@ -660,6 +672,91 @@ async fn cache_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "cached_prices": cache.prices.data.len(),
     });
     (StatusCode::OK, axum::Json(status))
+}
+
+/// Rate limit for manual refresh: 5 minutes (300 seconds)
+const MANUAL_REFRESH_RATE_LIMIT_SECS: u64 = 5 * 60;
+
+/// API endpoint to trigger a manual balance refresh.
+/// Rate-limited to once per 5 minutes.
+/// Returns 429 Too Many Requests if rate limited.
+/// Returns status indicating whether refresh was started or is already in progress.
+async fn manual_refresh(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Check rate limit
+    {
+        let last_refresh = state.last_manual_refresh.read().await;
+        if let Some(last_ts) = *last_refresh {
+            let elapsed = now.saturating_sub(last_ts);
+            if elapsed < MANUAL_REFRESH_RATE_LIMIT_SECS {
+                let retry_after = MANUAL_REFRESH_RATE_LIMIT_SECS - elapsed;
+                let response = serde_json::json!({
+                    "status": "rate_limited",
+                    "message": "Manual refresh rate limited to once per 5 minutes",
+                    "retry_after_seconds": retry_after
+                });
+                return (StatusCode::TOO_MANY_REQUESTS, axum::Json(response));
+            }
+        }
+    }
+
+    // Check if refresh is already in progress
+    {
+        let in_progress = state.refresh_in_progress.read().await;
+        if *in_progress {
+            let response = serde_json::json!({
+                "status": "already_in_progress",
+                "message": "A refresh is already in progress"
+            });
+            return (StatusCode::OK, axum::Json(response));
+        }
+    }
+
+    // Mark refresh as in progress and update last refresh time
+    {
+        let mut in_progress = state.refresh_in_progress.write().await;
+        *in_progress = true;
+    }
+    {
+        let mut last_refresh = state.last_manual_refresh.write().await;
+        *last_refresh = Some(now);
+    }
+
+    // Spawn the refresh task so we don't block the response
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        println!(
+            "[{}] Manual refresh triggered via API",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+
+        if let Err(e) = refresh_all_balances(&state_clone).await {
+            eprintln!(
+                "[{}] Manual refresh failed: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                e
+            );
+        } else {
+            println!(
+                "[{}] Manual refresh completed",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+        }
+
+        // Mark refresh as complete
+        let mut in_progress = state_clone.refresh_in_progress.write().await;
+        *in_progress = false;
+    });
+
+    let response = serde_json::json!({
+        "status": "started",
+        "message": "Balance refresh started"
+    });
+    (StatusCode::OK, axum::Json(response))
 }
 
 /// API endpoint to get all balances as JSON.
@@ -2820,6 +2917,8 @@ mod tests {
             cache: SharedCache::new(),
             api_key: None,
             refresh_interval_secs: 3600, // 1 hour
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
         });
 
         // Call health check
@@ -2845,6 +2944,8 @@ mod tests {
             cache,
             api_key: None,
             refresh_interval_secs: 3600, // 1 hour
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
         });
 
         // Call health check
@@ -2887,6 +2988,8 @@ mod tests {
             cache,
             api_key: None,
             refresh_interval_secs: 3600,
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
         });
 
         // Call the endpoint
