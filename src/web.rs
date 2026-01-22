@@ -350,6 +350,8 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/api/balances", get(get_balances_json))
         .route("/api/balances/company/:company", get(get_company_balances_json))
         .route("/api/balances/:address", get(get_single_balance_json))
+        .route("/api/totals", get(get_totals_json))
+        .route("/api/totals/company/:company", get(get_company_totals_json))
         .route("/api/cache/status", get(cache_status))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
 
@@ -1050,6 +1052,353 @@ async fn get_company_balances_json(
         "last_refresh": last_refresh_iso,
         "total_usd_value": company_total,
         "companies": companies
+    });
+
+    (StatusCode::OK, axum::Json(response))
+}
+
+/// API endpoint to get aggregated portfolio totals.
+/// Returns total USD value with breakdowns by chain and by token.
+async fn get_totals_json(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Load address book to get company and chain info
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    // Build maps from wallet/account name to company and chain
+    let mut name_to_company: HashMap<String, String> = HashMap::new();
+    let mut name_to_chain: HashMap<String, String> = HashMap::new();
+    for wallet in &book.addresses {
+        let company = if wallet.company.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            wallet.company.clone()
+        };
+        name_to_company.insert(wallet.name.clone(), company);
+        name_to_chain.insert(wallet.name.clone(), wallet.chain.display_name().to_string());
+    }
+    for account in &book.banking_accounts {
+        let company = if account.company.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            account.company.clone()
+        };
+        name_to_company.insert(account.name.clone(), company);
+        name_to_chain.insert(account.name.clone(), account.service.display_name().to_string());
+    }
+
+    let cache = state.cache.read().await;
+
+    // Aggregate totals
+    let mut total_usd_value = 0.0;
+    let mut by_chain: HashMap<String, f64> = HashMap::new();
+    let mut by_token: HashMap<String, (f64, f64)> = HashMap::new(); // symbol -> (amount, usd_value)
+    let mut by_company: HashMap<String, f64> = HashMap::new();
+
+    for (name, entry) in &cache.balances {
+        let balance = &entry.data;
+        let chain = name_to_chain
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| balance.chain_or_service.clone());
+        let company = name_to_company
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| "Uncategorized".to_string());
+
+        // Add to total
+        if let Some(usd) = balance.total_usd_value {
+            total_usd_value += usd;
+
+            // Add to chain breakdown
+            *by_chain.entry(chain.clone()).or_insert(0.0) += usd;
+
+            // Add to company breakdown
+            *by_company.entry(company).or_insert(0.0) += usd;
+        }
+
+        // Add native token to token breakdown
+        let native_usd = balance.native_usd_value.unwrap_or(0.0);
+        let token_entry = by_token
+            .entry(balance.native_symbol.clone())
+            .or_insert((0.0, 0.0));
+        token_entry.0 += balance.native_balance;
+        token_entry.1 += native_usd;
+
+        // Add other tokens to token breakdown
+        for token in &balance.tokens {
+            let token_usd = token.usd_value.unwrap_or(0.0);
+            let entry = by_token.entry(token.symbol.clone()).or_insert((0.0, 0.0));
+            entry.0 += token.balance;
+            entry.1 += token_usd;
+        }
+    }
+
+    // Convert by_chain to sorted vec of objects
+    let mut chain_totals: Vec<serde_json::Value> = by_chain
+        .into_iter()
+        .map(|(chain, usd_value)| {
+            serde_json::json!({
+                "chain": chain,
+                "total_usd_value": usd_value
+            })
+        })
+        .collect();
+    chain_totals.sort_by(|a, b| {
+        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Convert by_token to sorted vec of objects
+    let mut token_totals: Vec<serde_json::Value> = by_token
+        .into_iter()
+        .map(|(symbol, (amount, usd_value))| {
+            serde_json::json!({
+                "symbol": symbol,
+                "total_amount": amount,
+                "total_usd_value": usd_value
+            })
+        })
+        .collect();
+    token_totals.sort_by(|a, b| {
+        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Convert by_company to sorted vec of objects
+    let mut company_totals: Vec<serde_json::Value> = by_company
+        .into_iter()
+        .map(|(company, usd_value)| {
+            serde_json::json!({
+                "company": company,
+                "total_usd_value": usd_value
+            })
+        })
+        .collect();
+    company_totals.sort_by(|a, b| {
+        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Format last refresh timestamp as ISO 8601
+    let last_refresh_iso = match cache.last_full_refresh {
+        Some(ts) => chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        None => "never".to_string(),
+    };
+
+    // Get current timestamp
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let response = serde_json::json!({
+        "timestamp": timestamp,
+        "last_refresh": last_refresh_iso,
+        "total_usd_value": total_usd_value,
+        "by_chain": chain_totals,
+        "by_token": token_totals,
+        "by_company": company_totals
+    });
+
+    (StatusCode::OK, axum::Json(response))
+}
+
+/// API endpoint to get aggregated totals for a specific company.
+/// Returns total USD value for that company with breakdowns by chain and token.
+async fn get_company_totals_json(
+    State(state): State<Arc<AppState>>,
+    Path(company_param): Path<String>,
+) -> impl IntoResponse {
+    // Load address book to find wallets with matching company tag
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    // Normalize company name comparison (case-insensitive)
+    let company_lower = company_param.to_lowercase();
+
+    // Find all wallet names belonging to this company
+    let mut wallet_names: Vec<String> = book
+        .addresses
+        .iter()
+        .filter(|w| {
+            let wallet_company = if w.company.is_empty() {
+                "uncategorized"
+            } else {
+                &w.company
+            };
+            wallet_company.to_lowercase() == company_lower
+        })
+        .map(|w| w.name.clone())
+        .collect();
+
+    // Also include banking accounts with matching company
+    let banking_names: Vec<String> = book
+        .banking_accounts
+        .iter()
+        .filter(|a| {
+            let account_company = if a.company.is_empty() {
+                "uncategorized"
+            } else {
+                &a.company
+            };
+            account_company.to_lowercase() == company_lower
+        })
+        .map(|a| a.name.clone())
+        .collect();
+
+    wallet_names.extend(banking_names);
+
+    // Return 404 if no wallets found for this company
+    if wallet_names.is_empty() {
+        let error = serde_json::json!({
+            "error": format!("No wallets found with company tag '{}'", company_param)
+        });
+        return (StatusCode::NOT_FOUND, axum::Json(error));
+    }
+
+    // Build map from wallet name to chain
+    let mut name_to_chain: HashMap<String, String> = HashMap::new();
+    for wallet in &book.addresses {
+        name_to_chain.insert(wallet.name.clone(), wallet.chain.display_name().to_string());
+    }
+    for account in &book.banking_accounts {
+        name_to_chain.insert(account.name.clone(), account.service.display_name().to_string());
+    }
+
+    let cache = state.cache.read().await;
+
+    // Aggregate totals for this company only
+    let mut total_usd_value = 0.0;
+    let mut by_chain: HashMap<String, f64> = HashMap::new();
+    let mut by_token: HashMap<String, (f64, f64)> = HashMap::new(); // symbol -> (amount, usd_value)
+
+    for name in &wallet_names {
+        if let Some(entry) = cache.balances.get(name) {
+            let balance = &entry.data;
+            let chain = name_to_chain
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| balance.chain_or_service.clone());
+
+            // Add to total
+            if let Some(usd) = balance.total_usd_value {
+                total_usd_value += usd;
+
+                // Add to chain breakdown
+                *by_chain.entry(chain.clone()).or_insert(0.0) += usd;
+            }
+
+            // Add native token to token breakdown
+            let native_usd = balance.native_usd_value.unwrap_or(0.0);
+            let token_entry = by_token
+                .entry(balance.native_symbol.clone())
+                .or_insert((0.0, 0.0));
+            token_entry.0 += balance.native_balance;
+            token_entry.1 += native_usd;
+
+            // Add other tokens to token breakdown
+            for token in &balance.tokens {
+                let token_usd = token.usd_value.unwrap_or(0.0);
+                let entry = by_token.entry(token.symbol.clone()).or_insert((0.0, 0.0));
+                entry.0 += token.balance;
+                entry.1 += token_usd;
+            }
+        }
+    }
+
+    // Convert by_chain to sorted vec of objects
+    let mut chain_totals: Vec<serde_json::Value> = by_chain
+        .into_iter()
+        .map(|(chain, usd_value)| {
+            serde_json::json!({
+                "chain": chain,
+                "total_usd_value": usd_value
+            })
+        })
+        .collect();
+    chain_totals.sort_by(|a, b| {
+        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Convert by_token to sorted vec of objects
+    let mut token_totals: Vec<serde_json::Value> = by_token
+        .into_iter()
+        .map(|(symbol, (amount, usd_value))| {
+            serde_json::json!({
+                "symbol": symbol,
+                "total_amount": amount,
+                "total_usd_value": usd_value
+            })
+        })
+        .collect();
+    token_totals.sort_by(|a, b| {
+        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Use the original company name from the first matching wallet for display
+    let display_company = book
+        .addresses
+        .iter()
+        .find(|w| w.company.to_lowercase() == company_lower)
+        .map(|w| {
+            if w.company.is_empty() {
+                "Uncategorized".to_string()
+            } else {
+                w.company.clone()
+            }
+        })
+        .or_else(|| {
+            book.banking_accounts
+                .iter()
+                .find(|a| a.company.to_lowercase() == company_lower)
+                .map(|a| {
+                    if a.company.is_empty() {
+                        "Uncategorized".to_string()
+                    } else {
+                        a.company.clone()
+                    }
+                })
+        })
+        .unwrap_or(company_param.clone());
+
+    // Format last refresh timestamp as ISO 8601
+    let last_refresh_iso = match cache.last_full_refresh {
+        Some(ts) => chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        None => "never".to_string(),
+    };
+
+    // Get current timestamp
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let response = serde_json::json!({
+        "timestamp": timestamp,
+        "last_refresh": last_refresh_iso,
+        "company": display_company,
+        "total_usd_value": total_usd_value,
+        "by_chain": chain_totals,
+        "by_token": token_totals
     });
 
     (StatusCode::OK, axum::Json(response))
