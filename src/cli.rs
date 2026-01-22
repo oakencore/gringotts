@@ -140,5 +140,10 @@ pub enum Commands {
         /// Default: 4h
         #[arg(short = 'r', long)]
         refresh_interval: Option<String>,
+
+        /// Fetch balances immediately on startup (eager mode).
+        /// Without this flag, server starts immediately and serves cached/empty data until first scheduled refresh (lazy mode).
+        #[arg(short, long)]
+        eager: bool,
     },
 }

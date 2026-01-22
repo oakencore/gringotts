@@ -250,7 +250,7 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-pub async fn start_server(port: u16, refresh_interval: Option<String>) -> anyhow::Result<()> {
+pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bool) -> anyhow::Result<()> {
     // Resolve refresh interval
     let interval = resolve_refresh_interval(refresh_interval)?;
     let interval_display = format_duration(interval);
@@ -265,6 +265,9 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>) -> anyhow
     let cache_age = cache.read().await.cache_age_string();
 
     let state = Arc::new(AppState { cache });
+
+    // Determine startup mode description
+    let startup_mode = if eager { "eager (fetching balances now)" } else { "lazy (serving cached data)" };
 
     let app = Router::new()
         .route("/", get(index))
@@ -289,11 +292,24 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>) -> anyhow
     println!("║  Cache:          ~/.gringotts/cache.json                    ║");
     println!("║  Last refresh:   {:>42} ║", cache_age);
     println!("║  Refresh every:  {:>42} ║", interval_display);
+    println!("║  Startup mode:   {:>42} ║", startup_mode);
     println!("╠═══════════════════════════════════════════════════════════════╣");
     println!("║  To find your IP address:                                    ║");
     println!("║    macOS/Linux:  ifconfig | grep 'inet '                    ║");
     println!("║    Windows:      ipconfig                                    ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    // If eager mode, perform initial refresh before starting the server
+    if eager {
+        println!("[{}] Eager mode: fetching balances on startup...", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        if let Err(e) = refresh_all_balances(&state).await {
+            eprintln!("[{}] Warning: Initial balance fetch failed: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), e);
+        } else {
+            println!("[{}] Initial balance fetch completed", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        }
+    } else {
+        println!("[{}] Lazy mode: serving cached data until first scheduled refresh", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    }
 
     // Spawn background refresh task
     let refresh_state = state.clone();
