@@ -348,6 +348,7 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
         .route("/api/balances", get(get_balances_json))
+        .route("/api/balances/:address", get(get_single_balance_json))
         .route("/api/cache/status", get(cache_status))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
 
@@ -776,6 +777,115 @@ async fn get_balances_json(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "timestamp": timestamp,
         "last_refresh": last_refresh_iso,
         "total_usd_value": total_usd_value,
+        "companies": companies
+    });
+
+    (StatusCode::OK, axum::Json(response))
+}
+
+/// API endpoint to get balances for a specific wallet by address.
+/// Returns 404 if address not found in address book.
+/// Returns same nested structure as full response but for single wallet.
+async fn get_single_balance_json(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> impl IntoResponse {
+    // Load address book to find the wallet
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    // Find wallet by address (check both wallet addresses and banking account IDs)
+    let wallet = book.addresses.iter().find(|w| w.address == address);
+    let banking = book.banking_accounts.iter().find(|a| a.account_id == address);
+
+    // Determine name and company based on what was found
+    let (name, company) = match (wallet, banking) {
+        (Some(w), _) => (w.name.clone(), if w.company.is_empty() { "Uncategorized".to_string() } else { w.company.clone() }),
+        (_, Some(a)) => (a.name.clone(), if a.company.is_empty() { "Uncategorized".to_string() } else { a.company.clone() }),
+        (None, None) => {
+            let error = serde_json::json!({
+                "error": "Address not found in address book"
+            });
+            return (StatusCode::NOT_FOUND, axum::Json(error));
+        }
+    };
+
+    let cache = state.cache.read().await;
+
+    // Look up balance by name in cache
+    let balance_entry = match cache.balances.get(&name) {
+        Some(entry) => entry,
+        None => {
+            let error = serde_json::json!({
+                "error": "Balance data not found in cache - try refreshing"
+            });
+            return (StatusCode::NOT_FOUND, axum::Json(error));
+        }
+    };
+
+    let balance = &balance_entry.data;
+
+    // Build token list
+    let tokens: Vec<serde_json::Value> = balance
+        .tokens
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "symbol": t.symbol,
+                "balance": t.balance,
+                "usd_value": t.usd_value
+            })
+        })
+        .collect();
+
+    // Build wallet entry
+    let wallet_data = serde_json::json!({
+        "address": balance.address_or_id,
+        "chain": balance.chain_or_service,
+        "native": {
+            "symbol": balance.native_symbol,
+            "balance": balance.native_balance,
+            "usd_value": balance.native_usd_value
+        },
+        "tokens": tokens,
+        "total_usd_value": balance.total_usd_value
+    });
+
+    // Build nested structure matching full response format
+    let mut wallets: HashMap<String, serde_json::Value> = HashMap::new();
+    wallets.insert(name.clone(), wallet_data);
+
+    let company_total = balance.total_usd_value.unwrap_or(0.0);
+    let company_data = serde_json::json!({
+        "wallets": wallets,
+        "total_usd_value": company_total
+    });
+
+    let mut companies: HashMap<String, serde_json::Value> = HashMap::new();
+    companies.insert(company.clone(), company_data);
+
+    // Format last refresh timestamp as ISO 8601
+    let last_refresh_iso = match cache.last_full_refresh {
+        Some(ts) => chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        None => "never".to_string(),
+    };
+
+    // Get current timestamp
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let response = serde_json::json!({
+        "timestamp": timestamp,
+        "last_refresh": last_refresh_iso,
+        "total_usd_value": company_total,
         "companies": companies
     });
 
