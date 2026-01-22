@@ -347,6 +347,7 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/balances", get(query_balances))
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
+        .route("/api/balances", get(get_balances_json))
         .route("/api/cache/status", get(cache_status))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
 
@@ -653,6 +654,132 @@ async fn cache_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "cached_prices": cache.prices.data.len(),
     });
     (StatusCode::OK, axum::Json(status))
+}
+
+/// API endpoint to get all balances as JSON.
+/// Returns balances nested by company, then wallet, with USD values and metadata.
+async fn get_balances_json(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Load address book to get company groupings
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            let error = serde_json::json!({
+                "error": format!("Failed to load address book: {}", e)
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(error));
+        }
+    };
+
+    // Build a map from wallet/account name to company
+    let mut name_to_company: HashMap<String, String> = HashMap::new();
+    for wallet in &book.addresses {
+        let company = if wallet.company.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            wallet.company.clone()
+        };
+        name_to_company.insert(wallet.name.clone(), company);
+    }
+    for account in &book.banking_accounts {
+        let company = if account.company.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            account.company.clone()
+        };
+        name_to_company.insert(account.name.clone(), company);
+    }
+
+    let cache = state.cache.read().await;
+
+    // Build nested structure: company -> wallets -> balance data
+    let mut companies: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut total_usd_value = 0.0;
+
+    for (name, entry) in &cache.balances {
+        let balance = &entry.data;
+        let company = name_to_company
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| "Uncategorized".to_string());
+
+        // Build token list
+        let tokens: Vec<serde_json::Value> = balance
+            .tokens
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "symbol": t.symbol,
+                    "balance": t.balance,
+                    "usd_value": t.usd_value
+                })
+            })
+            .collect();
+
+        // Build wallet entry
+        let wallet_data = serde_json::json!({
+            "address": balance.address_or_id,
+            "chain": balance.chain_or_service,
+            "native": {
+                "symbol": balance.native_symbol,
+                "balance": balance.native_balance,
+                "usd_value": balance.native_usd_value
+            },
+            "tokens": tokens,
+            "total_usd_value": balance.total_usd_value
+        });
+
+        // Add to total
+        if let Some(usd) = balance.total_usd_value {
+            total_usd_value += usd;
+        }
+
+        // Get or create company entry
+        let company_entry = companies
+            .entry(company.clone())
+            .or_insert_with(|| serde_json::json!({ "wallets": {} }));
+
+        // Add wallet to company
+        if let Some(wallets) = company_entry.get_mut("wallets") {
+            if let Some(wallets_obj) = wallets.as_object_mut() {
+                wallets_obj.insert(name.clone(), wallet_data);
+            }
+        }
+    }
+
+    // Calculate company totals
+    for (_company_name, company_data) in companies.iter_mut() {
+        if let Some(wallets) = company_data.get("wallets") {
+            if let Some(wallets_obj) = wallets.as_object() {
+                let company_total: f64 = wallets_obj
+                    .values()
+                    .filter_map(|w| w.get("total_usd_value").and_then(|v| v.as_f64()))
+                    .sum();
+                if let Some(obj) = company_data.as_object_mut() {
+                    obj.insert("total_usd_value".to_string(), serde_json::json!(company_total));
+                }
+            }
+        }
+    }
+
+    // Format last refresh timestamp as ISO 8601
+    let last_refresh_iso = match cache.last_full_refresh {
+        Some(ts) => chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        None => "never".to_string(),
+    };
+
+    // Get current timestamp
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let response = serde_json::json!({
+        "timestamp": timestamp,
+        "last_refresh": last_refresh_iso,
+        "total_usd_value": total_usd_value,
+        "companies": companies
+    });
+
+    (StatusCode::OK, axum::Json(response))
 }
 
 /// Health check endpoint - no authentication required.
@@ -1983,5 +2110,47 @@ mod tests {
 
         // Status should be OK (200)
         assert_eq!(status.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_balances_json_response_structure() {
+        use crate::cache::{CachedBalance, CachedToken, SharedCache};
+        use axum::extract::State;
+
+        // Create app state with fresh cache
+        let cache = SharedCache::new();
+
+        // Add a test balance to the cache
+        let test_balance = CachedBalance {
+            name: "Test Wallet".to_string(),
+            address_or_id: "test123".to_string(),
+            chain_or_service: "Solana".to_string(),
+            native_symbol: "SOL".to_string(),
+            native_balance: 10.0,
+            native_usd_value: Some(1000.0),
+            tokens: vec![CachedToken {
+                symbol: "USDC".to_string(),
+                balance: 500.0,
+                usd_value: Some(500.0),
+            }],
+            total_usd_value: Some(1500.0),
+        };
+        cache.update_balance("Test Wallet", test_balance).await.unwrap();
+
+        // Mark a refresh
+        cache.mark_refresh().await.unwrap();
+
+        let state = Arc::new(AppState {
+            cache,
+            api_key: None,
+            refresh_interval_secs: 3600,
+        });
+
+        // Call the endpoint
+        let response = get_balances_json(State(state)).await;
+        let (parts, _body) = response.into_response().into_parts();
+
+        // Status should be OK (200)
+        assert_eq!(parts.status, StatusCode::OK);
     }
 }
