@@ -280,6 +280,18 @@ async fn api_key_auth(
 /// Default refresh interval: 4 hours
 const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 4 * 60 * 60;
 
+/// Minimum refresh interval enforced by the Settings POST handler.
+const MIN_REFRESH_INTERVAL_SECS: u64 = 30;
+
+/// Environment variables surfaced on the Settings page as configured/not-configured.
+const TRACKED_ENV_VARS: &[&str] = &[
+    "HELIUS_API_KEY",
+    "ALCHEMY_API_KEY",
+    "SURGE_API_KEY",
+    "MERCURY_API_KEY",
+    "CIRCLE_API_KEY",
+];
+
 /// Parse a duration string like "4h", "30m", "1d" into seconds.
 /// Supported units: s (seconds), m (minutes), h (hours), d (days)
 fn parse_duration(s: &str) -> anyhow::Result<Duration> {
@@ -353,6 +365,35 @@ fn format_duration(d: Duration) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+/// Compute (last_refresh_display, next_refresh_human) from cache state.
+/// `iso_fmt` is the strftime format for the last_refresh display string;
+/// `health_check` wants `"%Y-%m-%dT%H:%M:%SZ"`, `settings_page` wants
+/// `"%Y-%m-%d %H:%M:%S"`.
+fn compute_refresh_times(
+    last_full_refresh: Option<u64>,
+    interval_secs: u64,
+    iso_fmt: &str,
+) -> (String, String) {
+    match last_full_refresh {
+        Some(last_ts) => {
+            let last_iso = chrono::DateTime::from_timestamp(last_ts as i64, 0)
+                .map(|dt| dt.format(iso_fmt).to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed = now.saturating_sub(last_ts);
+            let next_in = interval_secs.saturating_sub(elapsed);
+            (last_iso, format_duration(Duration::from_secs(next_in)))
+        }
+        None => (
+            "never".to_string(),
+            format_duration(Duration::from_secs(interval_secs)),
+        ),
     }
 }
 
@@ -1834,28 +1875,8 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let interval_secs = *state.refresh_interval_secs.read().await;
 
     // Calculate time until next refresh based on last refresh timestamp
-    let (last_refresh_iso, next_refresh_in) = match cache.last_full_refresh {
-        Some(last_ts) => {
-            // Format last refresh as ISO 8601
-            let last_dt = chrono::DateTime::from_timestamp(last_ts as i64, 0)
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            // Calculate seconds until next refresh
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let elapsed = now.saturating_sub(last_ts);
-            let next_in = interval_secs.saturating_sub(elapsed);
-
-            (last_dt, format_duration(Duration::from_secs(next_in)))
-        }
-        None => (
-            "never".to_string(),
-            format_duration(Duration::from_secs(interval_secs)),
-        ),
-    };
+    let (last_refresh_iso, next_refresh_in) =
+        compute_refresh_times(cache.last_full_refresh, interval_secs, "%Y-%m-%dT%H:%M:%SZ");
 
     let status = serde_json::json!({
         "status": "healthy",
@@ -1872,51 +1893,21 @@ async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let interval_secs = *state.refresh_interval_secs.read().await;
     let interval = Duration::from_secs(interval_secs);
 
-    // Compute last/next refresh. cache.last_full_refresh is Option<u64>
-    // (Unix seconds), NOT a chrono DateTime - convert via from_timestamp.
-    let (last_refresh_iso, next_refresh) = match cache.last_full_refresh {
-        Some(last_ts) => {
-            let last_iso = chrono::DateTime::from_timestamp(last_ts as i64, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let elapsed = now.saturating_sub(last_ts);
-            let next_in = interval_secs.saturating_sub(elapsed);
-            (last_iso, format_duration(Duration::from_secs(next_in)))
-        }
-        None => ("never".to_string(), format_duration(interval)),
-    };
+    let (last_refresh_iso, next_refresh) =
+        compute_refresh_times(cache.last_full_refresh, interval_secs, "%Y-%m-%d %H:%M:%S");
 
     let cached_wallet_count = cache.balances.len();
     // cache.prices is CacheEntry<HashMap<...>>, so the actual map lives at .data.
     let cached_price_count = cache.prices.data.len();
     let price_cache_age = cache.cache_age_string();
 
-    let env_vars = vec![
-        EnvVarStatus {
-            name: "HELIUS_API_KEY".to_string(),
-            configured: std::env::var("HELIUS_API_KEY").is_ok(),
-        },
-        EnvVarStatus {
-            name: "ALCHEMY_API_KEY".to_string(),
-            configured: std::env::var("ALCHEMY_API_KEY").is_ok(),
-        },
-        EnvVarStatus {
-            name: "SURGE_API_KEY".to_string(),
-            configured: std::env::var("SURGE_API_KEY").is_ok(),
-        },
-        EnvVarStatus {
-            name: "MERCURY_API_KEY".to_string(),
-            configured: std::env::var("MERCURY_API_KEY").is_ok(),
-        },
-        EnvVarStatus {
-            name: "CIRCLE_API_KEY".to_string(),
-            configured: std::env::var("CIRCLE_API_KEY").is_ok(),
-        },
-    ];
+    let env_vars: Vec<EnvVarStatus> = TRACKED_ENV_VARS
+        .iter()
+        .map(|name| EnvVarStatus {
+            name: (*name).to_string(),
+            configured: std::env::var(name).is_ok(),
+        })
+        .collect();
 
     Html(
         SettingsTemplate {
@@ -1950,10 +1941,13 @@ async fn update_refresh_interval(
     };
 
     let new_secs = parsed.as_secs();
-    if new_secs < 30 {
+    if new_secs < MIN_REFRESH_INTERVAL_SECS {
         return (
             StatusCode::BAD_REQUEST,
-            "Interval must be at least 30 seconds".to_string(),
+            format!(
+                "Interval must be at least {} seconds",
+                MIN_REFRESH_INTERVAL_SECS
+            ),
         )
             .into_response();
     }
