@@ -113,6 +113,7 @@ struct CompanyGroup {
 struct BalancesTemplate {
     total_usd: f64,
     companies: Vec<(String, Vec<WalletGroup>)>,
+    tsv_export: String,
     error: String,
 }
 
@@ -2551,6 +2552,7 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 BalancesTemplate {
                     total_usd: 0.0,
                     companies: vec![],
+                    tsv_export: String::new(),
                     error: format!("Failed to load accounts: {}", e),
                 }
                 .render()
@@ -2564,6 +2566,7 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
             BalancesTemplate {
                 total_usd: 0.0,
                 companies: vec![],
+                tsv_export: String::new(),
                 error: String::new(),
             }
             .render()
@@ -3041,10 +3044,13 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
         }
     }
 
+    let tsv = build_balances_tsv(&companies_view);
+
     Html(
         BalancesTemplate {
             total_usd: portfolio.total_usd_value,
             companies: companies_view,
+            tsv_export: tsv,
             error: String::new(),
         }
         .render()
