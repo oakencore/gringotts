@@ -36,9 +36,9 @@
 
 This is a foundational change. The build will break briefly after Step 1 and recover by Step 4.
 
-- [ ] **Step 1: Change `AppState.refresh_interval_secs` field type**
+- [ ] **Step 1: Change `AppState` struct (add `port`, wrap interval)**
 
-Edit the struct definition (`src/display/web.rs` around line 188):
+Edit the struct definition (`src/display/web.rs` around line 188). Two changes in one step so the AppState constructors only need to be touched once: wrap `refresh_interval_secs` in `Arc<RwLock<u64>>` (for the Settings POST) AND add a new `port: u16` field (so the Settings page can display the listening port).
 
 ```rust
 /// Application state shared across handlers
@@ -46,6 +46,7 @@ Edit the struct definition (`src/display/web.rs` around line 188):
 pub struct AppState {
     pub cache: SharedCache,
     pub api_key: Option<String>,
+    pub port: u16,
     pub refresh_interval_secs: Arc<RwLock<u64>>,
     /// Timestamp of last manual refresh for rate limiting (Unix seconds)
     pub last_manual_refresh: Arc<RwLock<Option<u64>>>,
@@ -73,40 +74,63 @@ Change to:
 let state = Arc::new(AppState {
     cache,
     api_key,
+    port,
     refresh_interval_secs: Arc::new(RwLock::new(interval.as_secs())),
     last_manual_refresh: Arc::new(RwLock::new(None)),
     refresh_in_progress: Arc::new(RwLock::new(false)),
 });
 ```
 
+The `port` variable is already in scope (it's a function parameter on `start_server`).
+
 - [ ] **Step 3: Update the three test constructors**
 
-Three test sites construct `AppState` literally with `refresh_interval_secs: 3600`. Find them (search for `refresh_interval_secs: 3600` in `src/display/web.rs`; they are at approximately lines 3309, 3336, 3383). Change each to:
+Three test sites construct `AppState` literally with `refresh_interval_secs: 3600`. Find them with:
+
+```bash
+grep -n "refresh_interval_secs: 3600" src/display/web.rs
+```
+
+They are at approximately lines 3309, 3336, 3383. For each constructor, add the new `port` field and wrap the interval:
 
 ```rust
-refresh_interval_secs: Arc::new(RwLock::new(3600)),
+let state = Arc::new(AppState {
+    cache: SharedCache::new(),  // unchanged
+    api_key: None,              // unchanged
+    port: 3000,                 // NEW
+    refresh_interval_secs: Arc::new(RwLock::new(3600)),  // CHANGED
+    last_manual_refresh: Arc::new(RwLock::new(None)),    // unchanged
+    refresh_in_progress: Arc::new(RwLock::new(false)),   // unchanged
+});
 ```
 
 - [ ] **Step 4: Update `health_check` reads**
 
-Find the two reads at lines 1795 and 1801:
+`health_check` has **two** references to `state.refresh_interval_secs` (at lines 1795 and 1801). Both must change.
+
+Find the two reads:
 
 ```rust
+// line 1795
 let next_in = state.refresh_interval_secs.saturating_sub(elapsed);
 // ...
+// line 1801
 format_duration(Duration::from_secs(state.refresh_interval_secs)),
 ```
 
-Change to (the function is already `async`, so `.read().await` is fine):
+Read the value once at the top of the function (the function is already `async`):
 
 ```rust
-let interval = *state.refresh_interval_secs.read().await;
-let next_in = interval.saturating_sub(elapsed);
-// ...
-format_duration(Duration::from_secs(interval)),
+let interval_secs = *state.refresh_interval_secs.read().await;
 ```
 
-Compute `interval` once at the top of the function so both reads share it.
+Then replace both references with the local `interval_secs`:
+
+```rust
+let next_in = interval_secs.saturating_sub(elapsed);
+// ...
+format_duration(Duration::from_secs(interval_secs)),
+```
 
 - [ ] **Step 5: Verify the build still passes**
 
@@ -586,28 +610,27 @@ async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let interval_secs = *state.refresh_interval_secs.read().await;
     let interval = Duration::from_secs(interval_secs);
 
-    // Compute last/next refresh
-    let last_refresh_iso = cache
-        .last_refresh
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| "never".to_string());
-
-    let next_refresh = match cache.last_refresh {
-        Some(last_dt) => {
-            let last_ts = last_dt.timestamp() as u64;
+    // Compute last/next refresh. cache.last_full_refresh is Option<u64>
+    // (Unix seconds), NOT a chrono DateTime - convert via from_timestamp.
+    let (last_refresh_iso, next_refresh) = match cache.last_full_refresh {
+        Some(last_ts) => {
+            let last_iso = chrono::DateTime::from_timestamp(last_ts as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             let elapsed = now.saturating_sub(last_ts);
             let next_in = interval_secs.saturating_sub(elapsed);
-            format_duration(Duration::from_secs(next_in))
+            (last_iso, format_duration(Duration::from_secs(next_in)))
         }
-        None => format_duration(interval),
+        None => ("never".to_string(), format_duration(interval)),
     };
 
     let cached_wallet_count = cache.balances.len();
-    let cached_price_count = cache.prices.len();
+    // cache.prices is CacheEntry<HashMap<...>>, so the actual map lives at .data.
+    let cached_price_count = cache.prices.data.len();
     let price_cache_age = cache.cache_age_string();
 
     let env_vars = vec![
@@ -620,7 +643,7 @@ async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
     Html(
         SettingsTemplate {
-            port: 0, // filled below from state if available; placeholder here
+            port: state.port,
             refresh_interval_human: format_duration(interval),
             refresh_interval_secs: interval_secs,
             last_refresh: last_refresh_iso,
@@ -638,13 +661,7 @@ async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 }
 ```
 
-Note on `port`: `AppState` doesn't currently carry the port. Two options:
-- (Preferred) Add `pub port: u16` to `AppState` and populate from the CLI flag at the constructor. Then read it here.
-- (Quick) Read `state.api_key`-style — actually just hardcode "n/a" if you don't want to plumb it.
-
-For this task, **add `pub port: u16` to `AppState`** at line 192-198 and populate it from the `port` variable in `start_server` (around line 353 where the AppState is constructed). Then read `state.port` in `settings_page`.
-
-Update the three test constructors (search for `last_manual_refresh: Arc::new(RwLock::new(None))` to find them) to set `port: 3000` (any test value works).
+The `port` field on `AppState` was added in Task 1. `cache.last_full_refresh` (not `last_refresh`) is `Option<u64>` Unix seconds, mirroring the existing `health_check` handler at `web.rs:1782-1787`. `cache.prices.data.len()` (not `cache.prices.len()`) because `prices` is `CacheEntry<HashMap<String, f64>>`, which matches the existing `cache_status` handler at line 885.
 
 - [ ] **Step 3: Add the POST `/settings/refresh-interval` handler**
 
@@ -727,7 +744,7 @@ Task 7 replaces the body.
         <tr>
             <td class="label">Refresh interval</td>
             <td class="value">
-                <form hx-post="/settings/refresh-interval" hx-swap="none" style="display: inline-flex; gap: 8px;">
+                <form method="post" action="/settings/refresh-interval" style="display: inline-flex; gap: 8px;">
                     <input type="text" name="interval" value="{{ refresh_interval_human }}" class="input-inline">
                     <button type="submit" class="btn btn-primary btn-sm">Save</button>
                 </form>
@@ -989,7 +1006,9 @@ After `GlobalTxView`:
 ```rust
 impl GlobalTxView {
     fn from_solana(wallet: &crate::storage::WalletAddress, tx: &crate::chains::solana::SolanaTransaction) -> Self {
-        let date = match tx.block_time {
+        // Verified against src/chains/solana.rs:55-62 - the timestamp field is
+        // named `timestamp` (Option<i64>), NOT `block_time`.
+        let date = match tx.timestamp {
             Some(ts) => chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -998,7 +1017,7 @@ impl GlobalTxView {
 
         Self {
             date,
-            timestamp: tx.block_time.unwrap_or(0),
+            timestamp: tx.timestamp.unwrap_or(0),
             source_name: wallet.name.clone(),
             source_chain: "Solana".to_string(),
             description: tx.memo.clone().unwrap_or_else(|| {
@@ -1016,13 +1035,15 @@ impl GlobalTxView {
         }
     }
 
-    fn from_mercury(account: &crate::storage::BankingAccount, tx: &crate::banking::mercury::MercuryTransaction) -> Self {
+    // The Mercury transaction type is exported as `Transaction`, not
+    // `MercuryTransaction`. Verified against src/banking/mercury.rs:20.
+    fn from_mercury(account: &crate::storage::BankingAccount, tx: &crate::banking::mercury::Transaction) -> Self {
         let timestamp_str = tx.posted_at.as_ref().unwrap_or(&tx.created_at);
         let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
             .map(|dt| dt.timestamp())
             .unwrap_or(0);
         let date = if timestamp_str.len() >= 16 {
-            timestamp_str[..16].replace("T", " ")
+            timestamp_str[..16].replace('T', " ")
         } else {
             timestamp_str.clone()
         };
@@ -1050,9 +1071,9 @@ impl GlobalTxView {
 }
 ```
 
-Note: this assumes `solana::SolanaTransaction` has fields `block_time: Option<i64>`, `signature: String`, `memo: Option<String>`, `sol_change: f64`, `success: bool`. Verify by reading `src/chains/solana.rs` (the struct is defined just above `get_transactions` at line 250). If field names differ, adapt accordingly.
-
-Similarly for `mercury::MercuryTransaction` — verify field names in `src/banking/mercury.rs`.
+Field name verification (already done while writing the plan):
+- `solana::SolanaTransaction` at `src/chains/solana.rs:55` has `signature: String`, `timestamp: Option<i64>`, `slot: u64`, `success: bool`, `memo: Option<String>`, `sol_change: f64`.
+- `banking::mercury::Transaction` at `src/banking/mercury.rs:20` has `id`, `amount: f64`, `created_at: String`, `posted_at: Option<String>`, `status: String`, `note: Option<String>`, `bank_description: Option<String>`, `counterparty_name: Option<String>`, `kind: String`, `external_memo: Option<String>`.
 
 - [ ] **Step 3: Add unit tests for the conversions and sorting**
 
