@@ -143,6 +143,7 @@ struct SingleBalanceTemplate {
     native_usd: f64,
     tokens: Vec<TokenView>,
     total_usd: f64,
+    tsv_export: String,
     error: String,
 }
 
@@ -3072,6 +3073,7 @@ async fn query_single_balance(Path(name): Path<String>) -> impl IntoResponse {
                     native_usd: 0.0,
                     tokens: vec![],
                     total_usd: 0.0,
+                    tsv_export: String::new(),
                     error: format!("Failed to load accounts: {}", e),
                 }
                 .render()
@@ -3100,6 +3102,7 @@ async fn query_single_balance(Path(name): Path<String>) -> impl IntoResponse {
             native_usd: 0.0,
             tokens: vec![],
             total_usd: 0.0,
+            tsv_export: String::new(),
             error: format!("Account '{}' not found", name),
         }
         .render()
@@ -3253,6 +3256,15 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let tsv = build_single_balance_tsv(
+        &wallet.name,
+        &chain_name,
+        &wallet.address,
+        &native_symbol,
+        native_balance,
+        native_usd,
+        &tokens,
+    );
     Html(
         SingleBalanceTemplate {
             name: wallet.name.clone(),
@@ -3263,6 +3275,7 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
             native_usd,
             tokens,
             total_usd,
+            tsv_export: tsv,
             error,
         }
         .render()
@@ -3276,21 +3289,33 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
     match &account.service {
         BankingService::Mercury => match MercuryClient::new() {
             Ok(client) => match client.get_account_balance(&account.account_id).await {
-                Ok(balances) => Html(
-                    SingleBalanceTemplate {
-                        name: account.name.clone(),
-                        address: account.account_id.clone(),
-                        chain: service_name,
-                        native_symbol: "USD".to_string(),
-                        native_balance: balances.current_balance,
-                        native_usd: balances.current_balance,
-                        tokens: vec![],
-                        total_usd: balances.current_balance,
-                        error: String::new(),
-                    }
-                    .render()
-                    .unwrap_or_default(),
-                ),
+                Ok(balances) => {
+                    let tsv = build_single_balance_tsv(
+                        &account.name,
+                        &service_name,
+                        &account.account_id,
+                        "USD",
+                        balances.current_balance,
+                        balances.current_balance,
+                        &[],
+                    );
+                    Html(
+                        SingleBalanceTemplate {
+                            name: account.name.clone(),
+                            address: account.account_id.clone(),
+                            chain: service_name,
+                            native_symbol: "USD".to_string(),
+                            native_balance: balances.current_balance,
+                            native_usd: balances.current_balance,
+                            tokens: vec![],
+                            total_usd: balances.current_balance,
+                            tsv_export: tsv,
+                            error: String::new(),
+                        }
+                        .render()
+                        .unwrap_or_default(),
+                    )
+                }
                 Err(e) => Html(
                     SingleBalanceTemplate {
                         name: account.name.clone(),
@@ -3301,6 +3326,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                         native_usd: 0.0,
                         tokens: vec![],
                         total_usd: 0.0,
+                        tsv_export: String::new(),
                         error: format!("Failed to query: {}", e),
                     }
                     .render()
@@ -3317,6 +3343,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                     native_usd: 0.0,
                     tokens: vec![],
                     total_usd: 0.0,
+                    tsv_export: String::new(),
                     error: format!("Failed to initialize client: {}", e),
                 }
                 .render()
@@ -3341,6 +3368,15 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                             usd_value: usd,
                         });
                     }
+                    let tsv = build_single_balance_tsv(
+                        &account.name,
+                        &service_name,
+                        &account.account_id,
+                        "USD",
+                        total,
+                        total,
+                        &tokens,
+                    );
                     Html(
                         SingleBalanceTemplate {
                             name: account.name.clone(),
@@ -3351,6 +3387,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                             native_usd: total,
                             tokens,
                             total_usd: total,
+                            tsv_export: tsv,
                             error: String::new(),
                         }
                         .render()
@@ -3367,6 +3404,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                         native_usd: 0.0,
                         tokens: vec![],
                         total_usd: 0.0,
+                        tsv_export: String::new(),
                         error: format!("Failed to query: {}", e),
                     }
                     .render()
@@ -3383,6 +3421,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                     native_usd: 0.0,
                     tokens: vec![],
                     total_usd: 0.0,
+                    tsv_export: String::new(),
                     error: format!("Failed to initialize client: {}", e),
                 }
                 .render()
