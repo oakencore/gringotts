@@ -355,7 +355,7 @@ async fn index(
 ```
 
 Notes:
-- Read the *existing* body of `index` first to preserve the CompanyGroup-building logic (it iterates `book.addresses` and `book.banking_accounts`, groups by company, and builds `Vec<CompanyGroup>`). Do not re-derive it.
+- The existing `index` body lives at approximately `web.rs:1933-2005`. Preserve the company-grouping logic in the middle (roughly lines 1942-1993) verbatim. Replace only the final `let template = IndexTemplate { ... }; Html(template.render()...)` block (roughly lines 1995-2005) with the new construction shown above.
 - `State` is extracted but unused (`_state`); that's fine — Axum requires the extractor to be in scope for the handler signature to compile against the router. Underscore-prefixed binding silences the unused-variable warning.
 
 - [ ] **Step 3: Update `templates/index.html`**
