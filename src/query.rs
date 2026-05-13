@@ -408,7 +408,7 @@ fn enrich_and_display_balances(
                     &balances,
                     &wallet.chain,
                 );
-                aggregate_solana_balances(&mut portfolio, &wallet.company, &balances);
+                aggregate_solana_balances(&mut portfolio, &wallet.company, &wallet.name, &balances);
             }
             WalletBalances::Evm(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
@@ -419,7 +419,13 @@ fn enrich_and_display_balances(
                     &balances,
                     &wallet.chain,
                 );
-                aggregate_evm_balances(&mut portfolio, &wallet.company, &balances, &wallet.chain);
+                aggregate_evm_balances(
+                    &mut portfolio,
+                    &wallet.company,
+                    &wallet.name,
+                    &balances,
+                    &wallet.chain,
+                );
             }
             WalletBalances::Near(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
@@ -430,7 +436,7 @@ fn enrich_and_display_balances(
                     &balances,
                     &wallet.chain,
                 );
-                aggregate_near_balances(&mut portfolio, &wallet.company, &balances);
+                aggregate_near_balances(&mut portfolio, &wallet.company, &wallet.name, &balances);
             }
             WalletBalances::Aptos(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
@@ -441,7 +447,7 @@ fn enrich_and_display_balances(
                     &balances,
                     &wallet.chain,
                 );
-                aggregate_aptos_balances(&mut portfolio, &wallet.company, &balances);
+                aggregate_aptos_balances(&mut portfolio, &wallet.company, &wallet.name, &balances);
             }
             WalletBalances::Sui(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
@@ -452,7 +458,7 @@ fn enrich_and_display_balances(
                     &balances,
                     &wallet.chain,
                 );
-                aggregate_sui_balances(&mut portfolio, &wallet.company, &balances);
+                aggregate_sui_balances(&mut portfolio, &wallet.company, &wallet.name, &balances);
             }
             WalletBalances::Starknet(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
@@ -463,7 +469,12 @@ fn enrich_and_display_balances(
                     &balances,
                     &wallet.chain,
                 );
-                aggregate_starknet_balances(&mut portfolio, &wallet.company, &balances);
+                aggregate_starknet_balances(
+                    &mut portfolio,
+                    &wallet.company,
+                    &wallet.name,
+                    &balances,
+                );
             }
             WalletBalances::Mercury(account, balances) => {
                 ui::render_mercury_balances(
@@ -473,7 +484,12 @@ fn enrich_and_display_balances(
                     &balances,
                     &account.service,
                 );
-                aggregate_mercury_balances(&mut portfolio, &account.company, &balances);
+                aggregate_mercury_balances(
+                    &mut portfolio,
+                    &account.company,
+                    &account.name,
+                    &balances,
+                );
             }
             WalletBalances::Circle(account, balances) => {
                 ui::render_circle_balances(
@@ -482,7 +498,12 @@ fn enrich_and_display_balances(
                     &balances,
                     &account.service,
                 );
-                aggregate_circle_balances(&mut portfolio, &account.company, &balances);
+                aggregate_circle_balances(
+                    &mut portfolio,
+                    &account.company,
+                    &account.name,
+                    &balances,
+                );
             }
         }
     }
@@ -776,14 +797,16 @@ async fn query_and_display_evm(
     }
 }
 
-fn aggregate_solana_balances(
+pub(crate) fn aggregate_solana_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &solana::AccountBalances,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         "SOL",
         balances.sol_balance,
         balances.sol_usd_value,
@@ -791,20 +814,29 @@ fn aggregate_solana_balances(
 
     for token in &balances.token_balances {
         if let Some(symbol) = &token.symbol {
-            add_asset_to_portfolio(portfolio, company, symbol, token.ui_amount, token.usd_value);
+            add_asset_to_portfolio(
+                portfolio,
+                company,
+                wallet_name,
+                symbol,
+                token.ui_amount,
+                token.usd_value,
+            );
         }
     }
 }
 
-fn aggregate_evm_balances(
+pub(crate) fn aggregate_evm_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &evm::AccountBalances,
     _chain: &Chain,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         &balances.native_symbol,
         balances.eth_balance,
         balances.eth_usd_value,
@@ -812,7 +844,14 @@ fn aggregate_evm_balances(
 
     for token in &balances.token_balances {
         if let Some(symbol) = &token.symbol {
-            add_asset_to_portfolio(portfolio, company, symbol, token.ui_amount, token.usd_value);
+            add_asset_to_portfolio(
+                portfolio,
+                company,
+                wallet_name,
+                symbol,
+                token.ui_amount,
+                token.usd_value,
+            );
         }
     }
 }
@@ -839,14 +878,16 @@ async fn query_and_display_near(
     }
 }
 
-fn aggregate_near_balances(
+pub(crate) fn aggregate_near_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &near::AccountBalances,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         "NEAR",
         balances.near_balance,
         balances.near_usd_value,
@@ -875,14 +916,16 @@ async fn query_and_display_aptos(
     }
 }
 
-fn aggregate_aptos_balances(
+pub(crate) fn aggregate_aptos_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &aptos::AccountBalances,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         "APT",
         balances.apt_balance,
         balances.apt_usd_value,
@@ -911,14 +954,16 @@ async fn query_and_display_sui(
     }
 }
 
-fn aggregate_sui_balances(
+pub(crate) fn aggregate_sui_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &sui::AccountBalances,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         "SUI",
         balances.sui_balance,
         balances.sui_usd_value,
@@ -947,37 +992,42 @@ async fn query_and_display_starknet(
     }
 }
 
-fn aggregate_starknet_balances(
+pub(crate) fn aggregate_starknet_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &starknet::AccountBalances,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         "ETH",
         balances.eth_balance,
         balances.eth_usd_value,
     );
 }
 
-fn aggregate_mercury_balances(
+pub(crate) fn aggregate_mercury_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &mercury::AccountBalances,
 ) {
     add_asset_to_portfolio(
         portfolio,
         company,
+        wallet_name,
         "USD",
         balances.current_balance,
         Some(balances.current_balance),
     );
 }
 
-fn aggregate_circle_balances(
+pub(crate) fn aggregate_circle_balances(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     balances: &circle::AccountBalances,
 ) {
     // Aggregate available balances - only treat USD-denominated balances as USD value
@@ -991,6 +1041,7 @@ fn aggregate_circle_balances(
         add_asset_to_portfolio(
             portfolio,
             company,
+            wallet_name,
             &balance.currency,
             balance.amount,
             usd_value,
