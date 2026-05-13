@@ -482,11 +482,7 @@ Expected: 3 sites in `query_balances` plus the struct definition. All three cons
 cargo build 2>&1 | tail -5
 ```
 
-Expected: clean build. If Askama complains about missing template field, that's because `balances.html` doesn't reference `tsv_export` yet — that's fine, the template doesn't have to consume every field. Build passes regardless.
-
-Actually, Askama requires the field be referenced or it will complain. If the build fails with `field 'tsv_export' is never used` or similar, add `#[allow(dead_code)]` on the field temporarily — Task 5 wires the template and removes the need.
-
-If build is clean, proceed.
+Expected: clean build. The Rust compiler may emit a `dead_code` warning on `BalancesTemplate.tsv_export` until Task 5 wires the field into the Askama template; that warning is expected and disappears in the next task. Do not silence it with `#[allow(dead_code)]` — it's signal that Task 5 is still pending.
 
 - [ ] **Step 5: Run tests**
 
@@ -524,7 +520,7 @@ Find the `.balances-footer` div (around line 69-75). Currently:
 </div>
 ```
 
-Add the copy button after the timestamp span, inside the footer:
+The footer uses `display: flex; justify-content: space-between;`, so the two existing children (`.portfolio-total` and the timestamp span) sit on opposite ends. To preserve that layout while adding a third child, wrap the timestamp AND the new button into a single right-side container. The existing timestamp span is **moved** from being a direct child of `.balances-footer` to being a child of the new `.balances-footer-right` wrapper:
 
 ```html
 <div class="balances-footer">
@@ -623,33 +619,46 @@ For **error-path constructions** (where the template carries no asset data), use
 tsv_export: String::new(),
 ```
 
-For **success-path constructions** (in `query_wallet_balance` and `query_bank_balance` success branches), use:
+For **success-path constructions** (in `query_wallet_balance` and `query_bank_balance` success branches), the existing literals move `chain_name`/`service_name` and `native_symbol` into struct fields. The TSV builder needs to **borrow** those values. Calling `build_single_balance_tsv(&chain_name, ...)` inline within the struct literal **fails to compile** (borrow-after-move) because Rust evaluates struct fields top-to-bottom and `chain: chain_name` moves before `tsv_export` reads it.
+
+**Pattern: compute the TSV into a local first, then move into the struct literal.** This mirrors the pattern from Task 4 Step 2 (`let tsv = build_balances_tsv(&companies_view);` before the `BalancesTemplate { ... }` literal).
+
+Each construction site is rewritten as:
 
 ```rust
-tsv_export: build_single_balance_tsv(
-    &wallet.name,         // or &account.name
-    &chain_name,          // or &service_name
-    &wallet.address,      // or &account.account_id
+let tsv = build_single_balance_tsv(
+    &wallet.name,
+    &chain_name,
+    &wallet.address,
     &native_symbol,
     native_balance,
     native_usd,
     &tokens,
-),
+);
+Html(
+    SingleBalanceTemplate {
+        // ... existing fields ...
+        tsv_export: tsv,
+        error,
+    }
+    .render()
+    .unwrap_or_default(),
+)
 ```
 
-Specifically:
+**Site-by-site enumeration** (use `grep -n "SingleBalanceTemplate {" src/display/web.rs` to locate exact lines, which may have shifted):
 
-- Line ~2977 (`query_single_balance` AddressBook load error): `tsv_export: String::new()`
-- Line ~3005 (`query_single_balance` not-found): `tsv_export: String::new()`
-- Line ~3168 (`query_wallet_balance` success): `tsv_export: build_single_balance_tsv(&wallet.name, &chain_name, &wallet.address, &native_symbol, native_balance, native_usd, &tokens)`
-- Line ~3191 (Mercury success): `tsv_export: build_single_balance_tsv(&account.name, &service_name, &account.account_id, "USD", balances.current_balance, balances.current_balance, &[])`
-- Line ~3206 (Mercury fetch error): `tsv_export: String::new()`
-- Line ~3222 (Mercury client-init error): `tsv_export: String::new()`
-- Line ~3256 (Circle success — verify exact site): use the same `build_single_balance_tsv` shape with the Circle tokens. Read the surrounding code to identify which variables hold the data.
-- Line ~3272 (Circle fetch error): `tsv_export: String::new()`
-- Line ~3288 (Circle client-init error): `tsv_export: String::new()`
-
-Note on `query_wallet_balance` success path: the `service_name`/`chain_name` and `address`/`account_id` distinction differs between the crypto and bank paths. Confirm against the code at line ~3168 onwards: the crypto branch uses `wallet.name`, `chain_name`, `wallet.address`, `native_symbol`, `native_balance`, `native_usd`, `tokens`.
+| Site | Path | Action |
+|---|---|---|
+| `query_single_balance` AddressBook load error (~2977) | Error path | `tsv_export: String::new()` inline (no moves to worry about) |
+| `query_single_balance` not-found (~3005) | Error path | `tsv_export: String::new()` inline |
+| `query_wallet_balance` success (~3168) | Crypto success | Compute `let tsv = build_single_balance_tsv(&wallet.name, &chain_name, &wallet.address, &native_symbol, native_balance, native_usd, &tokens);` BEFORE the `Html(SingleBalanceTemplate { ... })` literal |
+| `query_bank_balance` Mercury success (~3191) | Mercury success | Compute `let tsv = build_single_balance_tsv(&account.name, &service_name, &account.account_id, "USD", balances.current_balance, balances.current_balance, &[]);` BEFORE the literal |
+| `query_bank_balance` Mercury fetch error (~3206) | Error path | `tsv_export: String::new()` inline |
+| `query_bank_balance` Mercury client-init error (~3222) | Error path | `tsv_export: String::new()` inline |
+| `query_bank_balance` Circle success (~3256) | Circle success | Variables in scope at this site: `tokens: Vec<TokenView>`, `total: f64`, `service_name: String` (will be moved), `account.name`, `account.account_id`. Compute `let tsv = build_single_balance_tsv(&account.name, &service_name, &account.account_id, "USD", total, total, &tokens);` BEFORE the literal |
+| `query_bank_balance` Circle fetch error (~3272) | Error path | `tsv_export: String::new()` inline |
+| `query_bank_balance` Circle client-init error (~3288) | Error path | `tsv_export: String::new()` inline |
 
 - [ ] **Step 3: Verify build**
 
@@ -780,17 +789,6 @@ Add a new listener inside the same `<script>` block (after the `htmx:afterSwap` 
         if (!btn) return;
         try {
             await navigator.clipboard.writeText(btn.dataset.tsv);
-            // Tiny visual feedback: swap the icon to a checkmark for 1.2s.
-            const icon = btn.querySelector('[data-lucide]');
-            if (icon) {
-                const original = icon.getAttribute('data-lucide');
-                icon.setAttribute('data-lucide', 'check');
-                lucide.createIcons();
-                setTimeout(() => {
-                    icon.setAttribute('data-lucide', original);
-                    lucide.createIcons();
-                }, 1200);
-            }
         } catch (err) {
             console.error('Clipboard write failed', err);
         }
@@ -798,7 +796,7 @@ Add a new listener inside the same `<script>` block (after the `htmx:afterSwap` 
 </script>
 ```
 
-The icon swap is a small UX touch — not in the spec's required set, but matches the "Section 4 — out of scope: 'Copied!' toast" note while still giving visible feedback (a check icon for 1.2 seconds). If you'd rather omit it for strict spec compliance, drop the inner `if (icon) { ... }` block.
+No visual feedback beyond the OS's normal clipboard-copy behavior. Adding a check-icon swap was considered but rejected: `lucide.createIcons()` replaces `<i data-lucide="...">` with an `<svg>` element that no longer carries `data-lucide`, so subsequent attempts to toggle the icon attribute would no-op. A working feedback affordance would require either a separate non-Lucide indicator (e.g., a temporary `.copied` class swap on the button) or a toast — both out of scope for this PR per the spec.
 
 - [ ] **Step 2: Verify build and tests**
 
