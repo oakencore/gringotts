@@ -5,7 +5,12 @@
 <div class="page-header">
     <div class="header-left">
         <h1 class="page-title">Portfolio Overview</h1>
-        <p class="page-subtitle">Track your crypto holdings across all wallets and chains</p>
+        <p class="page-subtitle">
+            {% if filter == "wallets" %}Wallets across all chains
+            {% else if filter == "banking" %}Banking accounts
+            {% else %}Track your crypto holdings across all wallets and chains
+            {% endif %}
+        </p>
     </div>
     <div class="header-actions">
         <button class="btn btn-primary" onclick="document.getElementById('add-wallet-modal').showModal()">
@@ -97,10 +102,15 @@
         </div>
     </div>
     <div class="card" id="holdings-content">
-        {% if companies.is_empty() %}
+        {% if !has_visible_rows %}
         <div class="empty">
             <i data-lucide="wallet" style="width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.3;"></i>
-            <p>No accounts tracked yet</p>
+            <p>
+                {% if filter == "wallets" %}No wallets tracked yet
+                {% else if filter == "banking" %}No banking accounts tracked yet
+                {% else %}No accounts tracked yet
+                {% endif %}
+            </p>
             <p class="text-muted" style="margin-top: 8px;">Add a wallet or bank account to get started</p>
         </div>
         {% else %}
@@ -118,6 +128,7 @@
             </thead>
             <tbody>
                 {% for company in companies %}
+                {% if filter != "banking" %}
                 {% for wallet in company.wallets %}
                 <tr id="row-{{ wallet.name|replace(" ", "-") }}">
                     <td>
@@ -166,6 +177,8 @@
                     <td colspan="7" id="detail-{{ wallet.name|replace(" ", "-") }}"></td>
                 </tr>
                 {% endfor %}
+                {% endif %}
+                {% if filter != "wallets" %}
                 {% for account in company.banking_accounts %}
                 <tr id="row-{{ account.name|replace(" ", "-") }}">
                     <td>
@@ -214,6 +227,7 @@
                     <td colspan="7" id="detail-{{ account.name|replace(" ", "-") }}"></td>
                 </tr>
                 {% endfor %}
+                {% endif %}
                 {% endfor %}
             </tbody>
         </table>

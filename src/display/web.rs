@@ -89,6 +89,9 @@ struct IndexTemplate {
     companies: Vec<CompanyGroup>,
     wallet_count: usize,
     bank_count: usize,
+    filter: String,
+    active_nav: String,
+    has_visible_rows: bool,
 }
 
 struct CompanyGroup {
@@ -202,6 +205,12 @@ pub struct AppState {
 #[derive(Deserialize)]
 struct ApiKeyQuery {
     api_key: Option<String>,
+}
+
+/// Query parameters for the dashboard filter
+#[derive(Deserialize)]
+struct DashboardFilter {
+    filter: Option<String>,
 }
 
 /// Middleware to validate API key authentication.
@@ -1936,7 +1945,10 @@ async fn get_companies_json() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(response))
 }
 
-async fn index() -> impl IntoResponse {
+async fn index(
+    State(_state): State<Arc<AppState>>,
+    Query(q): Query<DashboardFilter>,
+) -> impl IntoResponse {
     let book = match AddressBook::load() {
         Ok(b) => b,
         Err(_) => AddressBook::new(),
@@ -1944,6 +1956,13 @@ async fn index() -> impl IntoResponse {
 
     let wallet_count = book.addresses.len();
     let bank_count = book.banking_accounts.len();
+
+    // Map filter query param to canonical strings
+    let (filter, active_nav) = match q.filter.as_deref() {
+        Some("wallets") => ("wallets".to_string(), "wallets".to_string()),
+        Some("banking") => ("banking".to_string(), "banking".to_string()),
+        _ => ("all".to_string(), "dashboard".to_string()),
+    };
 
     // Group by company
     let mut company_map: HashMap<String, (Vec<WalletView>, Vec<BankingView>)> = HashMap::new();
@@ -1998,16 +2017,24 @@ async fn index() -> impl IntoResponse {
         }
     });
 
-    let template = IndexTemplate {
-        companies,
-        wallet_count,
-        bank_count,
+    // Compute has_visible_rows AFTER companies is built
+    let has_visible_rows = match filter.as_str() {
+        "wallets" => companies.iter().any(|c| !c.wallets.is_empty()),
+        "banking" => companies.iter().any(|c| !c.banking_accounts.is_empty()),
+        _ => !companies.is_empty(),
     };
 
     Html(
-        template
-            .render()
-            .unwrap_or_else(|e| format!("Template error: {}", e)),
+        IndexTemplate {
+            companies,
+            wallet_count,
+            bank_count,
+            filter,
+            active_nav,
+            has_visible_rows,
+        }
+        .render()
+        .unwrap_or_else(|e| format!("Template error: {}", e)),
     )
 }
 
@@ -3400,5 +3427,26 @@ mod tests {
 
         // Status should be OK (200)
         assert_eq!(parts.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn test_index_template_filter_routing() {
+        // The mapping from filter query string to (filter, active_nav)
+        // is small enough to test directly without spinning up a handler.
+        let cases: [(Option<&str>, (&str, &str)); 4] = [
+            (None, ("all", "dashboard")),
+            (Some("wallets"), ("wallets", "wallets")),
+            (Some("banking"), ("banking", "banking")),
+            (Some("garbage"), ("all", "dashboard")),
+        ];
+        for (input, (want_filter, want_nav)) in cases {
+            let (got_filter, got_nav) = match input {
+                Some("wallets") => ("wallets", "wallets"),
+                Some("banking") => ("banking", "banking"),
+                _ => ("all", "dashboard"),
+            };
+            assert_eq!(got_filter, want_filter, "filter for input {:?}", input);
+            assert_eq!(got_nav, want_nav, "active_nav for input {:?}", input);
+        }
     }
 }
