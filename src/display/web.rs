@@ -97,6 +97,9 @@ struct IndexTemplate {
     companies: Vec<CompanyGroup>,
     wallet_count: usize,
     bank_count: usize,
+    filter: String,
+    active_nav: String,
+    has_visible_rows: bool,
 }
 
 struct CompanyGroup {
@@ -169,6 +172,101 @@ struct TransactionView {
     counterparty: String,
 }
 
+struct GlobalTxView {
+    date: String,
+    timestamp: i64,
+    source_name: String,
+    source_chain: String,
+    description: String,
+    amount: f64,
+    currency: String,
+    status: String,
+    explorer_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "global_transactions.html")]
+struct GlobalTransactionsTemplate {
+    rows: Vec<GlobalTxView>,
+    active_nav: String,
+}
+
+impl GlobalTxView {
+    fn from_solana(
+        wallet: &crate::storage::WalletAddress,
+        tx: &crate::chains::solana::SolanaTransaction,
+    ) -> Self {
+        // Verified against src/chains/solana.rs:55-62 - the timestamp field is
+        // named `timestamp` (Option<i64>), NOT `block_time`.
+        let date = match tx.timestamp {
+            Some(ts) => chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            None => "pending".to_string(),
+        };
+
+        Self {
+            date,
+            timestamp: tx.timestamp.unwrap_or(0),
+            source_name: wallet.name.clone(),
+            source_chain: "Solana".to_string(),
+            description: tx.memo.clone().unwrap_or_else(|| {
+                let sig = &tx.signature;
+                if sig.len() > 12 {
+                    format!("{}…{}", &sig[..6], &sig[sig.len() - 6..])
+                } else {
+                    sig.clone()
+                }
+            }),
+            amount: tx.sol_change,
+            currency: "SOL".to_string(),
+            status: if tx.success {
+                "Confirmed".to_string()
+            } else {
+                "Failed".to_string()
+            },
+            explorer_url: format!("https://solscan.io/tx/{}", tx.signature),
+        }
+    }
+
+    // The Mercury transaction type is exported as `Transaction`, not
+    // `MercuryTransaction`. Verified against src/banking/mercury.rs:20.
+    fn from_mercury(
+        account: &crate::storage::BankingAccount,
+        tx: &crate::banking::mercury::Transaction,
+    ) -> Self {
+        let timestamp_str = tx.posted_at.as_ref().unwrap_or(&tx.created_at);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0);
+        let date = if timestamp_str.len() >= 16 {
+            timestamp_str[..16].replace('T', " ")
+        } else {
+            timestamp_str.clone()
+        };
+
+        let description = tx
+            .bank_description
+            .clone()
+            .or(tx.note.clone())
+            .or(tx.external_memo.clone())
+            .or_else(|| tx.counterparty_name.clone())
+            .unwrap_or_else(|| tx.kind.clone());
+
+        Self {
+            date,
+            timestamp,
+            source_name: account.name.clone(),
+            source_chain: "Mercury".to_string(),
+            description,
+            amount: tx.amount,
+            currency: "USD".to_string(),
+            status: tx.status.clone(),
+            explorer_url: String::new(),
+        }
+    }
+}
+
 struct WalletView {
     name: String,
     #[allow(dead_code)]
@@ -199,12 +297,40 @@ struct AddAccountForm {
     chain: String,
 }
 
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    port: u16,
+    refresh_interval_human: String,
+    #[allow(dead_code)]
+    refresh_interval_secs: u64,
+    last_refresh: String,
+    next_refresh: String,
+    api_key_enabled: bool,
+    cached_wallet_count: usize,
+    cached_price_count: usize,
+    price_cache_age: String,
+    env_vars: Vec<EnvVarStatus>,
+    active_nav: String,
+}
+
+struct EnvVarStatus {
+    name: String,
+    configured: bool,
+}
+
+#[derive(Deserialize)]
+struct RefreshIntervalForm {
+    interval: String,
+}
+
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
     pub cache: SharedCache,
     pub api_key: Option<String>,
-    pub refresh_interval_secs: u64,
+    pub port: u16,
+    pub refresh_interval_secs: Arc<RwLock<u64>>,
     /// Timestamp of last manual refresh for rate limiting (Unix seconds)
     pub last_manual_refresh: Arc<RwLock<Option<u64>>>,
     /// Whether a refresh is currently in progress
@@ -215,6 +341,12 @@ pub struct AppState {
 #[derive(Deserialize)]
 struct ApiKeyQuery {
     api_key: Option<String>,
+}
+
+/// Query parameters for the dashboard filter
+#[derive(Deserialize)]
+struct DashboardFilter {
+    filter: Option<String>,
 }
 
 /// Middleware to validate API key authentication.
@@ -256,6 +388,18 @@ async fn api_key_auth(
 
 /// Default refresh interval: 4 hours
 const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 4 * 60 * 60;
+
+/// Minimum refresh interval enforced by the Settings POST handler.
+const MIN_REFRESH_INTERVAL_SECS: u64 = 30;
+
+/// Environment variables surfaced on the Settings page as configured/not-configured.
+const TRACKED_ENV_VARS: &[&str] = &[
+    "HELIUS_API_KEY",
+    "ALCHEMY_API_KEY",
+    "SURGE_API_KEY",
+    "MERCURY_API_KEY",
+    "CIRCLE_API_KEY",
+];
 
 /// Parse a duration string like "4h", "30m", "1d" into seconds.
 /// Supported units: s (seconds), m (minutes), h (hours), d (days)
@@ -309,6 +453,16 @@ fn resolve_refresh_interval(cli_interval: Option<String>) -> anyhow::Result<Dura
     Ok(Duration::from_secs(DEFAULT_REFRESH_INTERVAL_SECS))
 }
 
+/// Maps the optional `filter` query string value to canonical
+/// (filter_label, active_nav_label) strings.
+fn resolve_dashboard_filter(input: Option<&str>) -> (&'static str, &'static str) {
+    match input {
+        Some("wallets") => ("wallets", "wallets"),
+        Some("banking") => ("banking", "banking"),
+        _ => ("all", "dashboard"),
+    }
+}
+
 /// Format a duration for display
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -320,6 +474,35 @@ fn format_duration(d: Duration) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+/// Compute (last_refresh_display, next_refresh_human) from cache state.
+/// `iso_fmt` is the strftime format for the last_refresh display string;
+/// `health_check` wants `"%Y-%m-%dT%H:%M:%SZ"`, `settings_page` wants
+/// `"%Y-%m-%d %H:%M:%S"`.
+fn compute_refresh_times(
+    last_full_refresh: Option<u64>,
+    interval_secs: u64,
+    iso_fmt: &str,
+) -> (String, String) {
+    match last_full_refresh {
+        Some(last_ts) => {
+            let last_iso = chrono::DateTime::from_timestamp(last_ts as i64, 0)
+                .map(|dt| dt.format(iso_fmt).to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed = now.saturating_sub(last_ts);
+            let next_in = interval_secs.saturating_sub(elapsed);
+            (last_iso, format_duration(Duration::from_secs(next_in)))
+        }
+        None => (
+            "never".to_string(),
+            format_duration(Duration::from_secs(interval_secs)),
+        ),
     }
 }
 
@@ -367,7 +550,8 @@ pub async fn start_server(
     let state = Arc::new(AppState {
         cache,
         api_key,
-        refresh_interval_secs: interval.as_secs(),
+        port,
+        refresh_interval_secs: Arc::new(RwLock::new(interval.as_secs())),
         last_manual_refresh: Arc::new(RwLock::new(None)),
         refresh_in_progress: Arc::new(RwLock::new(false)),
     });
@@ -382,6 +566,9 @@ pub async fn start_server(
     // Routes that require authentication
     let protected_routes = Router::new()
         .route("/", get(index))
+        .route("/settings", get(settings_page))
+        .route("/settings/refresh-interval", post(update_refresh_interval))
+        .route("/transactions", get(global_transactions))
         .route("/accounts", post(add_account))
         .route("/accounts/:name", delete(remove_account))
         .route("/balances", get(query_balances))
@@ -467,7 +654,7 @@ pub async fn start_server(
     // Spawn background refresh task
     let refresh_state = state.clone();
     tokio::spawn(async move {
-        background_refresh_task(refresh_state, interval).await;
+        background_refresh_task(refresh_state).await;
     });
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -476,16 +663,16 @@ pub async fn start_server(
     Ok(())
 }
 
-/// Background task that refreshes balances on a configured interval
-async fn background_refresh_task(state: Arc<AppState>, interval: Duration) {
-    let mut ticker = tokio::time::interval(interval);
-
+/// Background task that refreshes balances on a configurable interval.
+/// Reads the current interval from state on each loop iteration so the
+/// Settings UI's POST to /settings/refresh-interval takes effect on the
+/// next tick.
+async fn background_refresh_task(state: Arc<AppState>) {
     // Skip the first immediate tick - don't refresh right at startup
-    ticker.tick().await;
+    let initial = *state.refresh_interval_secs.read().await;
+    tokio::time::sleep(Duration::from_secs(initial)).await;
 
     loop {
-        ticker.tick().await;
-
         println!(
             "[{}] Starting background refresh...",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -503,6 +690,9 @@ async fn background_refresh_task(state: Arc<AppState>, interval: Duration) {
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
             );
         }
+
+        let next = *state.refresh_interval_secs.read().await;
+        tokio::time::sleep(Duration::from_secs(next)).await;
     }
 }
 
@@ -1791,30 +1981,11 @@ async fn get_company_totals_json(
 /// Returns server status, last refresh time, and next scheduled refresh.
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cache = state.cache.read().await;
+    let interval_secs = *state.refresh_interval_secs.read().await;
 
     // Calculate time until next refresh based on last refresh timestamp
-    let (last_refresh_iso, next_refresh_in) = match cache.last_full_refresh {
-        Some(last_ts) => {
-            // Format last refresh as ISO 8601
-            let last_dt = chrono::DateTime::from_timestamp(last_ts as i64, 0)
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            // Calculate seconds until next refresh
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let elapsed = now.saturating_sub(last_ts);
-            let next_in = state.refresh_interval_secs.saturating_sub(elapsed);
-
-            (last_dt, format_duration(Duration::from_secs(next_in)))
-        }
-        None => (
-            "never".to_string(),
-            format_duration(Duration::from_secs(state.refresh_interval_secs)),
-        ),
-    };
+    let (last_refresh_iso, next_refresh_in) =
+        compute_refresh_times(cache.last_full_refresh, interval_secs, "%Y-%m-%dT%H:%M:%SZ");
 
     let status = serde_json::json!({
         "status": "healthy",
@@ -1823,6 +1994,168 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     });
 
     (StatusCode::OK, axum::Json(status))
+}
+
+/// Settings page - renders runtime config, cache status, and env-var configured/not-configured.
+async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cache = state.cache.read().await;
+    let interval_secs = *state.refresh_interval_secs.read().await;
+    let interval = Duration::from_secs(interval_secs);
+
+    let (last_refresh_iso, next_refresh) =
+        compute_refresh_times(cache.last_full_refresh, interval_secs, "%Y-%m-%d %H:%M:%S");
+
+    let cached_wallet_count = cache.balances.len();
+    // cache.prices is CacheEntry<HashMap<...>>, so the actual map lives at .data.
+    let cached_price_count = cache.prices.data.len();
+    let price_cache_age = cache.cache_age_string();
+
+    let env_vars: Vec<EnvVarStatus> = TRACKED_ENV_VARS
+        .iter()
+        .map(|name| EnvVarStatus {
+            name: (*name).to_string(),
+            configured: std::env::var(name).is_ok(),
+        })
+        .collect();
+
+    Html(
+        SettingsTemplate {
+            port: state.port,
+            refresh_interval_human: format_duration(interval),
+            refresh_interval_secs: interval_secs,
+            last_refresh: last_refresh_iso,
+            next_refresh,
+            api_key_enabled: state.api_key.is_some(),
+            cached_wallet_count,
+            cached_price_count,
+            price_cache_age,
+            env_vars,
+            active_nav: "settings".to_string(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
+}
+
+/// Update the in-memory refresh interval. Session-only; CLI flag is for persistence.
+async fn update_refresh_interval(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<RefreshIntervalForm>,
+) -> impl IntoResponse {
+    let parsed = match parse_duration(&form.interval) {
+        Ok(d) => d,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("Invalid interval: {}", e)).into_response();
+        }
+    };
+
+    let new_secs = parsed.as_secs();
+    if new_secs < MIN_REFRESH_INTERVAL_SECS {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Interval must be at least {} seconds",
+                MIN_REFRESH_INTERVAL_SECS
+            ),
+        )
+            .into_response();
+    }
+
+    *state.refresh_interval_secs.write().await = new_secs;
+
+    // Redirect back to /settings so the browser follows after the plain form POST.
+    axum::response::Redirect::to("/settings").into_response()
+}
+
+/// Global transactions page - aggregates recent activity from Solana wallets
+/// and Mercury accounts. Failed RPC calls and missing API keys are silently
+/// skipped (per spec). Results sorted newest-first, truncated to 100 rows.
+async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(_) => AddressBook::new(),
+    };
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut rows: Vec<GlobalTxView> = Vec::new();
+
+    // Solana wallets - SolanaClient::get_transactions is synchronous and uses
+    // std::thread::sleep internally, so wrap each fetch in spawn_blocking to
+    // avoid stalling the Tokio runtime. Use JoinSet so per-wallet RPC calls
+    // overlap rather than running sequentially.
+    let mut solana_set = tokio::task::JoinSet::new();
+    for wallet in book.addresses.iter().filter(|w| w.chain == Chain::Solana) {
+        let wallet = wallet.clone();
+        solana_set.spawn_blocking(move || {
+            let client = SolanaClient::new(None);
+            let txs = client.get_transactions(&wallet.address, 25);
+            (wallet, txs)
+        });
+    }
+
+    while let Some(join_result) = solana_set.join_next().await {
+        match join_result {
+            Ok((wallet, Ok(txs))) => {
+                for tx in &txs {
+                    rows.push(GlobalTxView::from_solana(&wallet, tx));
+                }
+            }
+            Ok((wallet, Err(e))) => {
+                eprintln!(
+                    "[{}] [transactions] Solana fetch failed for {}: {}",
+                    timestamp, wallet.name, e
+                );
+            }
+            Err(e) => {
+                eprintln!("[{}] [transactions] Solana task panicked: {}", timestamp, e);
+            }
+        }
+    }
+
+    // Mercury accounts - async client
+    for account in book
+        .banking_accounts
+        .iter()
+        .filter(|a| a.service == BankingService::Mercury)
+    {
+        let client = match MercuryClient::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[{}] [transactions] Failed to initialize Mercury client (skipping {}): {}",
+                    timestamp, account.name, e
+                );
+                continue;
+            }
+        };
+        match client
+            .get_transactions(&account.account_id, None, None)
+            .await
+        {
+            Ok(txs) => {
+                for tx in txs.iter().take(50) {
+                    rows.push(GlobalTxView::from_mercury(account, tx));
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[{}] [transactions] Mercury fetch failed for {}: {}",
+                    timestamp, account.name, e
+                );
+            }
+        }
+    }
+
+    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    rows.truncate(100);
+
+    Html(
+        GlobalTransactionsTemplate {
+            rows,
+            active_nav: "transactions".to_string(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
 }
 
 /// API endpoint to list all tracked wallet addresses with metadata.
@@ -1944,7 +2277,10 @@ async fn get_companies_json() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(response))
 }
 
-async fn index() -> impl IntoResponse {
+async fn index(
+    State(_state): State<Arc<AppState>>,
+    Query(q): Query<DashboardFilter>,
+) -> impl IntoResponse {
     let book = match AddressBook::load() {
         Ok(b) => b,
         Err(_) => AddressBook::new(),
@@ -1952,6 +2288,11 @@ async fn index() -> impl IntoResponse {
 
     let wallet_count = book.addresses.len();
     let bank_count = book.banking_accounts.len();
+
+    // Map filter query param to canonical strings
+    let (filter, active_nav) = resolve_dashboard_filter(q.filter.as_deref());
+    let filter = filter.to_string();
+    let active_nav = active_nav.to_string();
 
     // Group by company
     let mut company_map: HashMap<String, (Vec<WalletView>, Vec<BankingView>)> = HashMap::new();
@@ -2006,16 +2347,24 @@ async fn index() -> impl IntoResponse {
         }
     });
 
-    let template = IndexTemplate {
-        companies,
-        wallet_count,
-        bank_count,
+    // Compute has_visible_rows AFTER companies is built
+    let has_visible_rows = match filter.as_str() {
+        "wallets" => companies.iter().any(|c| !c.wallets.is_empty()),
+        "banking" => companies.iter().any(|c| !c.banking_accounts.is_empty()),
+        _ => !companies.is_empty(),
     };
 
     Html(
-        template
-            .render()
-            .unwrap_or_else(|e| format!("Template error: {}", e)),
+        IndexTemplate {
+            companies,
+            wallet_count,
+            bank_count,
+            filter,
+            active_nav,
+            has_visible_rows,
+        }
+        .render()
+        .unwrap_or_else(|e| format!("Template error: {}", e)),
     )
 }
 
@@ -3421,7 +3770,8 @@ mod tests {
         let state = Arc::new(AppState {
             cache: SharedCache::new(),
             api_key: None,
-            refresh_interval_secs: 3600, // 1 hour
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)), // 1 hour
             last_manual_refresh: Arc::new(RwLock::new(None)),
             refresh_in_progress: Arc::new(RwLock::new(false)),
         });
@@ -3448,7 +3798,8 @@ mod tests {
         let state = Arc::new(AppState {
             cache,
             api_key: None,
-            refresh_interval_secs: 3600, // 1 hour
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)), // 1 hour
             last_manual_refresh: Arc::new(RwLock::new(None)),
             refresh_in_progress: Arc::new(RwLock::new(false)),
         });
@@ -3495,7 +3846,8 @@ mod tests {
         let state = Arc::new(AppState {
             cache,
             api_key: None,
-            refresh_interval_secs: 3600,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
             last_manual_refresh: Arc::new(RwLock::new(None)),
             refresh_in_progress: Arc::new(RwLock::new(false)),
         });
@@ -3506,5 +3858,118 @@ mod tests {
 
         // Status should be OK (200)
         assert_eq!(parts.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn test_resolve_dashboard_filter() {
+        assert_eq!(resolve_dashboard_filter(None), ("all", "dashboard"));
+        assert_eq!(
+            resolve_dashboard_filter(Some("wallets")),
+            ("wallets", "wallets")
+        );
+        assert_eq!(
+            resolve_dashboard_filter(Some("banking")),
+            ("banking", "banking")
+        );
+        assert_eq!(
+            resolve_dashboard_filter(Some("garbage")),
+            ("all", "dashboard")
+        );
+        assert_eq!(resolve_dashboard_filter(Some("")), ("all", "dashboard"));
+    }
+
+    #[tokio::test]
+    async fn test_update_refresh_interval_rejects_garbage() {
+        use crate::services::cache::SharedCache;
+        use axum::extract::{Form, State};
+        use axum::response::IntoResponse;
+
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
+        });
+
+        let form = Form(RefreshIntervalForm {
+            interval: "not-a-duration".to_string(),
+        });
+
+        let response = update_refresh_interval(State(state), form).await;
+        let (parts, _body) = response.into_response().into_parts();
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_update_refresh_interval_writes_state() {
+        use crate::services::cache::SharedCache;
+        use axum::extract::{Form, State};
+
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
+        });
+
+        let form = Form(RefreshIntervalForm {
+            interval: "2h".to_string(),
+        });
+
+        let _response = update_refresh_interval(State(state.clone()), form).await;
+        let stored = *state.refresh_interval_secs.read().await;
+        assert_eq!(stored, 7200);
+    }
+
+    #[tokio::test]
+    async fn test_update_refresh_interval_rejects_too_short() {
+        use crate::services::cache::SharedCache;
+        use axum::extract::{Form, State};
+        use axum::response::IntoResponse;
+
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
+        });
+
+        let form = Form(RefreshIntervalForm {
+            interval: "5s".to_string(),
+        });
+
+        let response = update_refresh_interval(State(state), form).await;
+        let (parts, _body) = response.into_response().into_parts();
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_global_tx_view_sort_and_truncate() {
+        let mut rows: Vec<GlobalTxView> = (0..150)
+            .map(|i| GlobalTxView {
+                date: "2026-05-13".to_string(),
+                timestamp: i as i64,
+                source_name: "test".to_string(),
+                source_chain: "Solana".to_string(),
+                description: "".to_string(),
+                amount: 0.0,
+                currency: "SOL".to_string(),
+                status: "Confirmed".to_string(),
+                explorer_url: "".to_string(),
+            })
+            .collect();
+
+        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        rows.truncate(100);
+
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].timestamp, 149);
+        assert_eq!(rows[99].timestamp, 50);
     }
 }

@@ -559,23 +559,23 @@
                 <span class="logo-dot"></span>
             </div>
             <nav class="sidebar-nav">
-                <a href="/" class="nav-item active">
+                <a href="/" class="nav-item {% if active_nav == "dashboard" %}active{% endif %}">
                     <i data-lucide="layout-dashboard"></i>
                     <span>Dashboard</span>
                 </a>
-                <a href="#wallets" class="nav-item">
+                <a href="/?filter=wallets" class="nav-item {% if active_nav == "wallets" %}active{% endif %}">
                     <i data-lucide="wallet"></i>
                     <span>Wallets</span>
                 </a>
-                <a href="#transactions" class="nav-item">
+                <a href="/transactions" class="nav-item {% if active_nav == "transactions" %}active{% endif %}">
                     <i data-lucide="arrow-left-right"></i>
                     <span>Transactions</span>
                 </a>
-                <a href="#banking" class="nav-item">
+                <a href="/?filter=banking" class="nav-item {% if active_nav == "banking" %}active{% endif %}">
                     <i data-lucide="landmark"></i>
                     <span>Banking</span>
                 </a>
-                <a href="#settings" class="nav-item">
+                <a href="/settings" class="nav-item {% if active_nav == "settings" %}active{% endif %}">
                     <i data-lucide="settings"></i>
                     <span>Settings</span>
                 </a>

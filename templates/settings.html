@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div class="header-left">
+        <h1 class="page-title">Settings</h1>
+        <p class="page-subtitle">Runtime configuration and cache status</p>
+    </div>
+</div>
+
+<div class="card">
+    <h2 class="section-heading">Server Configuration</h2>
+    <table class="settings-table">
+        <tr>
+            <td class="label">Port</td>
+            <td class="value">{{ port }}</td>
+        </tr>
+        <tr>
+            <td class="label">Refresh interval</td>
+            <td class="value">
+                <form method="post" action="/settings/refresh-interval" style="display: inline-flex; gap: 8px;">
+                    <input type="text" name="interval" value="{{ refresh_interval_human }}" class="input-inline">
+                    <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                </form>
+                <p class="text-muted" style="margin-top: 4px; font-size: 12px;">Session-only. Use --refresh-interval CLI flag to persist.</p>
+            </td>
+        </tr>
+        <tr>
+            <td class="label">Last refresh</td>
+            <td class="value">{{ last_refresh }}</td>
+        </tr>
+        <tr>
+            <td class="label">Next refresh</td>
+            <td class="value">in {{ next_refresh }}</td>
+        </tr>
+        <tr>
+            <td class="label">API key auth</td>
+            <td class="value">{% if api_key_enabled %}Enabled{% else %}Disabled{% endif %}</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2 class="section-heading">Cache Status</h2>
+    <table class="settings-table">
+        <tr>
+            <td class="label">Cached wallets</td>
+            <td class="value">{{ cached_wallet_count }}</td>
+        </tr>
+        <tr>
+            <td class="label">Cached prices</td>
+            <td class="value">{{ cached_price_count }} symbols</td>
+        </tr>
+        <tr>
+            <td class="label">Price cache age</td>
+            <td class="value">{{ price_cache_age }}</td>
+        </tr>
+    </table>
+    <button class="btn btn-primary"
+            hx-post="/api/refresh"
+            hx-swap="none"
+            hx-on::after-request="if(event.detail.xhr.status === 429) alert('Rate-limited. Try again in a few minutes.');">
+        Force refresh now
+    </button>
+    <p class="text-muted" style="margin-top: 8px; font-size: 12px;">Limited to once per 5 minutes.</p>
+</div>
+
+<div class="card">
+    <h2 class="section-heading">Environment</h2>
+    <table class="settings-table">
+        {% for env in env_vars %}
+        <tr>
+            <td class="label">{{ env.name }}</td>
+            <td class="value">{% if env.configured %}Configured{% else %}<span class="text-muted">Not configured</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+
+<style>
+    .section-heading {
+        font-size: 14px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-disabled);
+        margin-bottom: 12px;
+    }
+    .settings-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 12px;
+    }
+    .settings-table td {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border-subtle);
+    }
+    .settings-table .label {
+        font-weight: 500;
+        width: 200px;
+        color: var(--text-secondary);
+    }
+    .settings-table .value {
+        font-family: var(--font-mono);
+    }
+    .input-inline {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 4px 8px;
+        font-family: var(--font-mono);
+        font-size: 13px;
+        color: var(--text-primary);
+        width: 80px;
+    }
+</style>
+{% endblock %}
