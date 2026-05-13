@@ -463,6 +463,17 @@ fn resolve_dashboard_filter(input: Option<&str>) -> (&'static str, &'static str)
     }
 }
 
+/// Replace tab, newline, and CR with a single space each so the value
+/// is safe to embed in a TSV cell. Other characters pass through.
+fn escape_tsv(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\t' | '\n' | '\r' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
 /// Format a duration for display
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -3971,5 +3982,14 @@ mod tests {
         assert_eq!(rows.len(), 100);
         assert_eq!(rows[0].timestamp, 149);
         assert_eq!(rows[99].timestamp, 50);
+    }
+
+    #[test]
+    fn test_escape_tsv_strips_control_chars() {
+        assert_eq!(escape_tsv("foo\tbar\nbaz\rqux"), "foo bar baz qux");
+        assert_eq!(escape_tsv("clean"), "clean");
+        assert_eq!(escape_tsv(""), "");
+        // Adjacent control chars collapse to one space each, not deduplicated
+        assert_eq!(escape_tsv("a\t\tb"), "a  b");
     }
 }
