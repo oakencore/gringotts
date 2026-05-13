@@ -2061,39 +2061,38 @@ async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoRe
         Ok(b) => b,
         Err(_) => AddressBook::new(),
     };
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut rows: Vec<GlobalTxView> = Vec::new();
 
     // Solana wallets - SolanaClient::get_transactions is synchronous and uses
     // std::thread::sleep internally, so wrap each fetch in spawn_blocking to
-    // avoid stalling the Tokio runtime.
+    // avoid stalling the Tokio runtime. Use JoinSet so per-wallet RPC calls
+    // overlap rather than running sequentially.
+    let mut solana_set = tokio::task::JoinSet::new();
     for wallet in book.addresses.iter().filter(|w| w.chain == Chain::Solana) {
         let wallet = wallet.clone();
-        let wallet_name_for_err = wallet.name.clone();
-        let join_result = tokio::task::spawn_blocking(move || {
+        solana_set.spawn_blocking(move || {
             let client = SolanaClient::new(None);
             let txs = client.get_transactions(&wallet.address, 25);
             (wallet, txs)
-        })
-        .await;
+        });
+    }
 
+    while let Some(join_result) = solana_set.join_next().await {
         match join_result {
             Ok((wallet, Ok(txs))) => {
                 for tx in &txs {
                     rows.push(GlobalTxView::from_solana(&wallet, tx));
                 }
             }
-            Ok((_wallet, Err(e))) => {
+            Ok((wallet, Err(e))) => {
                 eprintln!(
                     "[{}] [transactions] Solana fetch failed for {}: {}",
-                    timestamp, wallet_name_for_err, e
+                    timestamp, wallet.name, e
                 );
             }
             Err(e) => {
-                eprintln!(
-                    "[{}] [transactions] Solana task panicked for {}: {}",
-                    timestamp, wallet_name_for_err, e
-                );
+                eprintln!("[{}] [transactions] Solana task panicked: {}", timestamp, e);
             }
         }
     }
