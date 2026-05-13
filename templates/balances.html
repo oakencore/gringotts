@@ -71,7 +71,13 @@
         <span class="total-label">Total Portfolio Value</span>
         <span class="total-value">${{ total_usd|format_usd }}</span>
     </div>
-    <span class="timestamp">Updated: <span id="balance-time"></span></span>
+    <div class="balances-footer-right">
+        <button class="btn btn-secondary btn-sm" data-tsv="{{ tsv_export }}">
+            <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+            <span>Copy as TSV</span>
+        </button>
+        <span class="timestamp">Updated: <span id="balance-time"></span></span>
+    </div>
 </div>
 
 {% endif %}
@@ -85,6 +91,12 @@
         padding: 20px;
         background: var(--bg-elevated);
         border-top: 1px solid var(--border-subtle);
+    }
+
+    .balances-footer-right {
+        display: flex;
+        align-items: center;
+        gap: 16px;
     }
 
     .portfolio-total {
