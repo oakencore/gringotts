@@ -92,7 +92,7 @@ Environment
 **Editable controls:**
 
 1. **Refresh interval** — text input accepting duration strings (e.g., `4h`, `30m`, `1d`) parsed by the existing `parse_duration` helper at `src/display/web.rs:248`. Posts a form to `/settings/refresh-interval` which updates `AppState.refresh_interval_secs`. The change takes effect at the next tick of the background refresh task (see implementation note below).
-2. **Force refresh now** — HTMX-POSTs to the existing `/api/refresh` endpoint (handler `manual_refresh` at `web.rs:897`, route registered around `web.rs:387`), which already implements the 30-second cooldown.
+2. **Force refresh now** — HTMX-POSTs to the existing `/api/refresh` endpoint (handler `manual_refresh` at `web.rs:897`, route registered around `web.rs:387`), which already implements a 5-minute cooldown (`MANUAL_REFRESH_RATE_LIMIT_SECS` at `web.rs:891`). The UI should surface the cooldown to the user: disable the button and show the remaining seconds when the endpoint returns 429.
 
 **Read-only displays:**
 - Port (passed from CLI args / config via `AppState`).
@@ -108,6 +108,9 @@ Environment
 - `health_check` at `web.rs:1795` and `web.rs:1801` (both reads, async context, so `.read().await` is fine).
 - The signature of `background_refresh_task` at `web.rs:466` currently accepts `interval: Duration` as a separate argument (computed at startup, passed by value). That argument becomes redundant once the task reads from state. The signature changes to drop `interval`, and the task pulls `state.refresh_interval_secs.read().await` at the top of each loop iteration.
 - Three test sites at `web.rs:3309`, `web.rs:3336`, `web.rs:3383` that construct `AppState` literally; they need to wrap the value in `Arc::new(RwLock::new(...))`.
+- The call site at `web.rs:455-456` that spawns `background_refresh_task(refresh_state, interval).await` must drop the `interval` argument when the signature changes (the task reads from state instead).
+
+**Persistence:** Updates to `refresh_interval_secs` are in-memory only and reset on restart. This matches the existing CLI-flag / env-var semantics (the `--refresh-interval` flag at startup is the durable source). Document this in the UI (e.g., "Effective for this session only; set the `--refresh-interval` CLI flag to persist").
 
 **Background task ticker behavior** (`background_refresh_task` at `web.rs:466`):
 
@@ -264,7 +267,7 @@ Alternative considered: a base Askama struct with a `nav` field shared via `{% i
 - Click each sidebar item; verify active-state highlighting and that the page renders.
 - Browser back/forward navigation between `/`, `/?filter=wallets`, `/?filter=banking`, `/transactions`, `/settings` works without re-fetch glitches.
 - Change refresh interval on Settings; confirm it takes effect (long-form test, optional).
-- Force refresh button works and respects the 30-second cooldown.
+- Force refresh button works and respects the 5-minute cooldown (returns 429 if pressed twice within 5 minutes).
 - Transactions page renders rows for any configured Solana wallets and Mercury accounts.
 
 **Quality gates before opening a PR:** `cargo fmt`, `cargo clippy` (no new warnings), `cargo test` (exact pass count reported).
