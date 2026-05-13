@@ -403,24 +403,9 @@ struct BalancesTemplate {
 
 - [ ] **Step 2: Wire the success-path construction**
 
-In `query_balances`, find the `Html(BalancesTemplate { total_usd: ..., companies: companies_view, error: String::new(), }...` construction at the end of the function (around line 2962). Insert `tsv_export: build_balances_tsv(&companies_view),` before the `error` field:
+In `query_balances`, find the success-path `Html(BalancesTemplate { ... })` construction at the end of the function (around line 2962).
 
-```rust
-Html(
-    BalancesTemplate {
-        total_usd: portfolio.total_usd_value,
-        companies: companies_view.clone(),
-        tsv_export: build_balances_tsv(&companies_view),
-        error: String::new(),
-    }
-    .render()
-    .unwrap_or_default(),
-)
-```
-
-Note: the original code moves `companies_view` into the template; since `build_balances_tsv` takes `&[(String, Vec<WalletGroup>)]`, we can either call `build_balances_tsv` BEFORE moving `companies_view` into the template, or clone. Cleaner: call first.
-
-Replace with:
+Because the existing literal moves `companies_view` into the `companies` field, the TSV builder (which borrows `&companies_view`) must run **before** the literal. Compute the TSV into a local first:
 
 ```rust
 let tsv = build_balances_tsv(&companies_view);
@@ -436,6 +421,8 @@ Html(
     .unwrap_or_default(),
 )
 ```
+
+This is the same "local-first" pattern used for all the `SingleBalanceTemplate` success paths in Task 6.
 
 - [ ] **Step 3: Wire the two error-path constructions**
 
@@ -556,7 +543,7 @@ Add a tiny CSS rule to the existing `<style>` block at the bottom of the file (a
 cargo build 2>&1 | tail -5
 ```
 
-Expected: clean build. The Askama macro now uses `tsv_export`, so any `#[allow(dead_code)]` added in Task 4 can be removed.
+Expected: clean build. The Askama macro now references `tsv_export`, so the `dead_code` warning from Task 4 Step 4 disappears.
 
 - [ ] **Step 3: Run tests**
 
@@ -666,7 +653,9 @@ Html(
 cargo build 2>&1 | tail -10
 ```
 
-Expected: clean build. If you missed a construction site, the compiler will name it.
+Expected: clean build. If you missed a construction site, the compiler will name it. Like Task 4 Step 4, a `dead_code` warning on `SingleBalanceTemplate.tsv_export` is expected until Task 7 wires `single_balance.html` to read it. Don't silence it with `#[allow(dead_code)]`.
+
+Sanity check the site count: `grep -n "SingleBalanceTemplate {" src/display/web.rs | wc -l` should return `10` (1 struct definition + 9 constructions).
 
 - [ ] **Step 4: Run tests**
 
@@ -858,7 +847,7 @@ In a browser at `http://localhost:3000`:
    - Rows with no USD value have an empty USD column (not `--` or `0`).
 3. On the dashboard, click **Query** on one wallet row to load a single-balance card. Click the copy button (the icon with the dual-page glyph) in the card header.
 4. Paste into the same sheet. Verify the per-wallet rows include the full address.
-5. Confirm the icon flashes to a check briefly after each copy.
+5. Open DevTools console. Click each copy button again. Confirm no `Clipboard write failed` error is logged. (There is no in-UI feedback by design — the OS clipboard is the source of truth.)
 
 - [ ] **Step 5: Commit any fmt/clippy fixes**
 
@@ -897,7 +886,7 @@ Spec: `docs/superpowers/specs/2026-05-13-copy-holdings-tsv-design.md`
 
 ## Out of scope (per spec)
 - "Copy as CSV" alternative
-- Toast confirmation (a brief icon swap to a check is included as a small UX touch)
+- Toast or in-UI feedback (no visual confirmation; OS clipboard is the source of truth)
 - Dashboard table copy (rows are placeholders until Query is clicked)
 - Per-wallet section buttons on `balances.html`
 
