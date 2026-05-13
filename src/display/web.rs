@@ -501,6 +501,51 @@ fn build_balances_tsv(companies: &[(String, Vec<WalletGroup>)]) -> String {
     tsv
 }
 
+/// Build a TSV string for a single-wallet detail view. Includes the
+/// native balance as the first asset row (skipped if native_balance
+/// == 0.0), followed by each token in `tokens`. Each row carries the
+/// full address so pasted rows are self-contained.
+#[allow(clippy::too_many_arguments)]
+fn build_single_balance_tsv(
+    wallet_name: &str,
+    chain: &str,
+    address: &str,
+    native_symbol: &str,
+    native_balance: f64,
+    native_usd: f64,
+    tokens: &[TokenView],
+) -> String {
+    let mut tsv = String::from("Wallet\tChain\tAddress\tSymbol\tAmount\tUSD Value\n");
+    let wallet_clean = escape_tsv(wallet_name);
+    let chain_clean = escape_tsv(chain);
+    let address_clean = escape_tsv(address);
+
+    let emit_row = |tsv: &mut String, symbol: &str, amount: f64, usd: f64| {
+        let usd_cell = if usd > 0.0 {
+            format!("{:.2}", usd)
+        } else {
+            String::new()
+        };
+        tsv.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{:.6}\t{}\n",
+            wallet_clean,
+            chain_clean,
+            address_clean,
+            escape_tsv(symbol),
+            amount,
+            usd_cell
+        ));
+    };
+
+    if native_balance != 0.0 {
+        emit_row(&mut tsv, native_symbol, native_balance, native_usd);
+    }
+    for token in tokens {
+        emit_row(&mut tsv, &token.symbol, token.balance, token.usd_value);
+    }
+    tsv
+}
+
 /// Format a duration for display
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -4088,5 +4133,78 @@ mod tests {
     fn test_build_balances_tsv_empty_input_returns_header_only() {
         let tsv = build_balances_tsv(&[]);
         assert_eq!(tsv, "Company\tWallet\tSymbol\tAmount\tUSD Value\n");
+    }
+
+    #[test]
+    fn test_build_single_balance_tsv_includes_native_and_tokens() {
+        let tokens = vec![
+            TokenView {
+                symbol: "USDC".to_string(),
+                balance: 100.0,
+                usd_value: 100.0,
+            },
+            TokenView {
+                symbol: "UNPRICED".to_string(),
+                balance: 5.5,
+                usd_value: 0.0,
+            },
+        ];
+        let tsv = build_single_balance_tsv(
+            "WalletA",
+            "Solana",
+            "So11111111111111111111111111111111111111112",
+            "SOL",
+            3.0,
+            300.0,
+            &tokens,
+        );
+        let lines: Vec<&str> = tsv.lines().collect();
+
+        assert_eq!(
+            lines[0],
+            "Wallet\tChain\tAddress\tSymbol\tAmount\tUSD Value"
+        );
+        assert_eq!(
+            lines[1],
+            "WalletA\tSolana\tSo11111111111111111111111111111111111111112\tSOL\t3.000000\t300.00"
+        );
+        assert_eq!(
+            lines[2],
+            "WalletA\tSolana\tSo11111111111111111111111111111111111111112\tUSDC\t100.000000\t100.00"
+        );
+        // Empty USD cell for unpriced token
+        assert_eq!(
+            lines[3],
+            "WalletA\tSolana\tSo11111111111111111111111111111111111111112\tUNPRICED\t5.500000\t"
+        );
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn test_build_single_balance_tsv_native_only_no_tokens() {
+        let tsv =
+            build_single_balance_tsv("BankA", "Mercury", "acc_123", "USD", 1500.0, 1500.0, &[]);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[1],
+            "BankA\tMercury\tacc_123\tUSD\t1500.000000\t1500.00"
+        );
+    }
+
+    #[test]
+    fn test_build_single_balance_tsv_zero_native_omits_native_row() {
+        // If the wallet has no native balance (e.g., zeroed-out), skip the native row.
+        // We still want the header and any token rows.
+        let tokens = vec![TokenView {
+            symbol: "USDC".to_string(),
+            balance: 100.0,
+            usd_value: 100.0,
+        }];
+        let tsv = build_single_balance_tsv("WalletA", "Solana", "addr", "SOL", 0.0, 0.0, &tokens);
+        let lines: Vec<&str> = tsv.lines().collect();
+        // Header + 1 token row only (native row omitted because amount is 0)
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "WalletA\tSolana\taddr\tUSDC\t100.000000\t100.00");
     }
 }
