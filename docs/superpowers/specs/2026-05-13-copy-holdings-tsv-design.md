@@ -31,7 +31,7 @@ Let a user copy holdings to the clipboard as **tab-separated values** with one c
 
 **Button placement:** One copy button inside the existing `<div class="balances-footer">`, next to the portfolio total. Lucide `copy` icon plus the label "Copy as TSV".
 
-**Data carrier:** A `data-tsv="..."` attribute on the copy button itself. Askama HTML-escapes the value automatically, so embedded tab characters survive as `&#9;` in source and decode to literal tabs on `dataset.tsv` read. Strings inside the TSV are passed through `escape_tsv` first to remove any raw tab/newline/CR (see Section 3) before assembly, so no double-escaping is required at the template layer.
+**Data carrier:** A single `data-tsv="..."` attribute on the copy button, holding the entire flattened table (header row + one line per `(company, wallet, asset)` triple). Askama HTML-escapes the attribute value automatically, so embedded tab characters survive as `&#9;` in source and decode to literal tabs on `dataset.tsv` read. Strings inside the TSV are passed through `escape_tsv` first to remove any raw tab/newline/CR (see Section 3) before assembly, so no double-escaping is required at the template layer.
 
 **TSV shape:**
 
@@ -107,6 +107,5 @@ Implementation note: `data-tsv` is read via `dataset.tsv` (JS auto-converts keba
 
 - Click "Copy as TSV" on `/balances`, paste into a Google Sheets or Excel sheet. Confirm the cells split correctly and Amount / USD Value land as numeric (right-aligned, sortable).
 - Click the per-wallet copy on a single-balance card, paste, confirm the same.
-- Confirm the `display: none` textarea is not visible.
 
 **Quality gates** before opening a PR: `cargo fmt`, `cargo clippy` (no new warnings), `cargo test`.
