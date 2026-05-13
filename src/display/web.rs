@@ -2061,6 +2061,7 @@ async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoRe
         Ok(b) => b,
         Err(_) => AddressBook::new(),
     };
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let mut rows: Vec<GlobalTxView> = Vec::new();
 
     // Solana wallets - SolanaClient::get_transactions is synchronous and uses
@@ -2068,19 +2069,31 @@ async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoRe
     // avoid stalling the Tokio runtime.
     for wallet in book.addresses.iter().filter(|w| w.chain == Chain::Solana) {
         let wallet = wallet.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let wallet_name_for_err = wallet.name.clone();
+        let join_result = tokio::task::spawn_blocking(move || {
             let client = SolanaClient::new(None);
-            client
-                .get_transactions(&wallet.address, 25)
-                .ok()
-                .map(|t| (wallet, t))
+            let txs = client.get_transactions(&wallet.address, 25);
+            (wallet, txs)
         })
-        .await
-        .ok()
-        .flatten();
-        if let Some((wallet, txs)) = result {
-            for tx in &txs {
-                rows.push(GlobalTxView::from_solana(&wallet, tx));
+        .await;
+
+        match join_result {
+            Ok((wallet, Ok(txs))) => {
+                for tx in &txs {
+                    rows.push(GlobalTxView::from_solana(&wallet, tx));
+                }
+            }
+            Ok((_wallet, Err(e))) => {
+                eprintln!(
+                    "[{}] [transactions] Solana fetch failed for {}: {}",
+                    timestamp, wallet_name_for_err, e
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[{}] [transactions] Solana task panicked for {}: {}",
+                    timestamp, wallet_name_for_err, e
+                );
             }
         }
     }
@@ -2093,7 +2106,13 @@ async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoRe
     {
         let client = match MercuryClient::new() {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "[{}] [transactions] Failed to initialize Mercury client (skipping {}): {}",
+                    timestamp, account.name, e
+                );
+                continue;
+            }
         };
         match client
             .get_transactions(&account.account_id, None, None)
@@ -2104,7 +2123,12 @@ async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoRe
                     rows.push(GlobalTxView::from_mercury(account, tx));
                 }
             }
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "[{}] [transactions] Mercury fetch failed for {}: {}",
+                    timestamp, account.name, e
+                );
+            }
         }
     }
 
