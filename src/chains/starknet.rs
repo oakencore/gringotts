@@ -50,7 +50,8 @@ struct JsonRpcError {
 impl StarknetClient {
     pub fn new(rpc_url: Option<String>) -> Self {
         // Use free public RPC from Nethermind (Blast API is no longer available)
-        let url = rpc_url.unwrap_or_else(|| "https://free-rpc.nethermind.io/mainnet-juno".to_string());
+        let url =
+            rpc_url.unwrap_or_else(|| "https://free-rpc.nethermind.io/mainnet-juno".to_string());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -117,18 +118,29 @@ impl StarknetClient {
             )
             .await?;
 
-        // Parse balance result
-        let balance_hex = result
+        // Parse balance result - Starknet uint256 returns [low, high] felt pair
+        let result_array = result
             .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid balance format"))?;
+            .ok_or_else(|| anyhow::anyhow!("Invalid balance format: expected array"))?;
 
-        // Parse hex string to u128
-        let balance_wei = u128::from_str_radix(
-            balance_hex.trim_start_matches("0x"),
-            16
-        ).unwrap_or(0);
+        let balance_hex = result_array
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid balance format: missing low felt"))?;
+
+        // Check if high felt is non-zero (balance exceeds u128)
+        if let Some(high_hex) = result_array.get(1).and_then(|v| v.as_str()) {
+            let high = u128::from_str_radix(high_hex.trim_start_matches("0x"), 16).unwrap_or(0);
+            if high > 0 {
+                eprintln!(
+                    "Warning: ETH balance on Starknet exceeds u128 range, high bits truncated"
+                );
+            }
+        }
+
+        // Parse hex string to u128 (low 128 bits)
+        let balance_wei =
+            u128::from_str_radix(balance_hex.trim_start_matches("0x"), 16).unwrap_or(0);
 
         // Convert wei to ETH (1 ETH = 10^18 wei)
         let eth_balance = balance_wei as f64 / 1_000_000_000_000_000_000.0;
@@ -148,8 +160,10 @@ impl StarknetClient {
 }
 
 // Implement PriceEnrichable trait for Starknet balances
-impl crate::PriceEnrichable for AccountBalances {
-    const NATIVE_SYMBOL: &'static str = "ETH";
+impl crate::types::PriceEnrichable for AccountBalances {
+    fn native_symbol(&self) -> &str {
+        "ETH"
+    }
 
     fn native_balance(&self) -> f64 {
         self.eth_balance

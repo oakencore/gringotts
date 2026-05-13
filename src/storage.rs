@@ -112,7 +112,7 @@ impl Chain {
             Chain::Near => "NEAR",
             Chain::Aptos => "APT",
             Chain::Sui => "SUI",
-            Chain::Starknet => "STRK",
+            Chain::Starknet => "ETH",
         }
     }
 }
@@ -162,12 +162,29 @@ impl AddressBook {
         }
 
         // Auto-detect based on address format
-        if address.len() == 42 && address.starts_with("0x")
-            && address[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-                // EVM address, default to Ethereum
-                return Ok(Chain::Ethereum);
+        if let Some(hex_body) = address.strip_prefix("0x") {
+            if hex_body.chars().all(|c| c.is_ascii_hexdigit()) {
+                if hex_body.len() == 40 {
+                    // Standard 20-byte EVM address
+                    return Ok(Chain::Ethereum);
+                } else if hex_body.len() == 64 {
+                    // 32-byte hex address: could be Aptos or Starknet
+                    // Aptos addresses are typically 64 hex chars; Starknet can vary
+                    // Default to Aptos; user can override with --chain starknet
+                    return Ok(Chain::Aptos);
+                } else if hex_body.len() > 40 {
+                    // Longer hex addresses are likely Starknet (variable length felt)
+                    return Ok(Chain::Starknet);
+                }
             }
+        }
 
+        // NEAR addresses contain a dot (e.g., "user.near", "account.testnet")
+        if address.contains('.') {
+            return Ok(Chain::Near);
+        }
+
+        // Sui addresses start with 0x but already handled above
         // Default to Solana for base58-encoded addresses
         Ok(Chain::Solana)
     }
@@ -179,11 +196,10 @@ impl AddressBook {
             return Ok(Self::new());
         }
 
-        let content = fs::read_to_string(&path)
-            .context("Failed to read address book")?;
+        let content = fs::read_to_string(&path).context("Failed to read address book")?;
 
-        let mut book: AddressBook = serde_json::from_str(&content)
-            .context("Failed to parse address book")?;
+        let mut book: AddressBook =
+            serde_json::from_str(&content).context("Failed to parse address book")?;
 
         // Clean up any whitespace
         for addr in &mut book.addresses {
@@ -201,28 +217,42 @@ impl AddressBook {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .context("Failed to create storage directory")?;
+            fs::create_dir_all(parent).context("Failed to create storage directory")?;
         }
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize address book")?;
+        let content =
+            serde_json::to_string_pretty(self).context("Failed to serialize address book")?;
 
-        fs::write(&path, content)
-            .context("Failed to write address book")?;
+        // Atomic write: write to temp file then rename
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, content).context("Failed to write address book")?;
+        fs::rename(&tmp_path, &path).context("Failed to finalize address book save")?;
 
         Ok(())
     }
 
-    pub fn add_address(&mut self, company: String, name: String, address: String, chain: Option<String>) -> Result<()> {
+    pub fn add_address(
+        &mut self,
+        company: String,
+        name: String,
+        address: String,
+        chain: Option<String>,
+    ) -> Result<()> {
         // Trim whitespace from inputs
         let company = company.trim().to_string();
         let name = name.trim().to_string();
         let address = address.trim().to_string();
 
-        // Check if name already exists
+        // Check if name already exists in either addresses or banking accounts
         if self.addresses.iter().any(|a| a.name == name) {
             anyhow::bail!("Address with name '{}' already exists", name);
+        }
+        if self.banking_accounts.iter().any(|a| a.name == name) {
+            anyhow::bail!("Banking account with name '{}' already exists", name);
+        }
+        // Check if address already exists
+        if self.addresses.iter().any(|a| a.address == address) {
+            anyhow::bail!("Address '{}' is already tracked", address);
         }
 
         // Detect or use specified chain
@@ -240,7 +270,8 @@ impl AddressBook {
     pub fn remove_by_identifier(&mut self, identifier: &str) -> Result<()> {
         let initial_len = self.addresses.len();
         // Remove by name or address
-        self.addresses.retain(|a| a.name != identifier && a.address != identifier);
+        self.addresses
+            .retain(|a| a.name != identifier && a.address != identifier);
 
         if self.addresses.len() == initial_len {
             anyhow::bail!("Address with name or address '{}' not found", identifier);
@@ -250,8 +281,7 @@ impl AddressBook {
     }
 
     fn get_storage_path() -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .context("Failed to get home directory")?;
+        let home = dirs::home_dir().context("Failed to get home directory")?;
 
         Ok(home.join(".gringotts").join("addresses.json"))
     }
@@ -263,11 +293,10 @@ impl AddressBook {
             return Ok(Self::new());
         }
 
-        let content = fs::read_to_string(path)
-            .context("Failed to read address book")?;
+        let content = fs::read_to_string(path).context("Failed to read address book")?;
 
-        let book: AddressBook = serde_json::from_str(&content)
-            .context("Failed to parse address book")?;
+        let book: AddressBook =
+            serde_json::from_str(&content).context("Failed to parse address book")?;
 
         Ok(book)
     }
@@ -276,20 +305,24 @@ impl AddressBook {
     #[cfg(test)]
     pub fn save_to_path(&self, path: &PathBuf) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .context("Failed to create storage directory")?;
+            fs::create_dir_all(parent).context("Failed to create storage directory")?;
         }
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize address book")?;
+        let content =
+            serde_json::to_string_pretty(self).context("Failed to serialize address book")?;
 
-        fs::write(path, content)
-            .context("Failed to write address book")?;
+        fs::write(path, content).context("Failed to write address book")?;
 
         Ok(())
     }
 
-    pub fn add_banking_account(&mut self, company: String, name: String, account_id: String, service: String) -> Result<()> {
+    pub fn add_banking_account(
+        &mut self,
+        company: String,
+        name: String,
+        account_id: String,
+        service: String,
+    ) -> Result<()> {
         // Trim whitespace from inputs
         let company = company.trim().to_string();
         let name = name.trim().to_string();
@@ -317,10 +350,14 @@ impl AddressBook {
     pub fn remove_banking_account_by_identifier(&mut self, identifier: &str) -> Result<()> {
         let initial_len = self.banking_accounts.len();
         // Remove by name or account_id
-        self.banking_accounts.retain(|a| a.name != identifier && a.account_id != identifier);
+        self.banking_accounts
+            .retain(|a| a.name != identifier && a.account_id != identifier);
 
         if self.banking_accounts.len() == initial_len {
-            anyhow::bail!("Banking account with name or account ID '{}' not found", identifier);
+            anyhow::bail!(
+                "Banking account with name or account ID '{}' not found",
+                identifier
+            );
         }
 
         Ok(())

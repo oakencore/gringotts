@@ -1,14 +1,14 @@
-use crate::aptos::AptosClient;
-use crate::cache::{CachedBalance, CachedToken, SharedCache};
-use crate::circle::CircleClient;
-use crate::evm::EvmClient;
-use crate::mercury::MercuryClient;
-use crate::near::NearClient;
-use crate::price::PriceService;
-use crate::solana::SolanaClient;
-use crate::starknet::StarknetClient;
+use crate::banking::circle::CircleClient;
+use crate::banking::mercury::MercuryClient;
+use crate::chains::aptos::AptosClient;
+use crate::chains::evm::EvmClient;
+use crate::chains::near::NearClient;
+use crate::chains::solana::SolanaClient;
+use crate::chains::starknet::StarknetClient;
+use crate::chains::sui::SuiClient;
+use crate::services::cache::{CachedBalance, CachedToken, SharedCache};
+use crate::services::price::PriceService;
 use crate::storage::{AddressBook, BankingService, Chain};
-use crate::sui::SuiClient;
 
 use askama::Template;
 use axum::{
@@ -23,8 +23,8 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 // Custom filter for formatting USD values
 mod filters {
@@ -49,7 +49,14 @@ mod filters {
         let integer_part = parts[0];
         let decimal_part = parts.get(1).unwrap_or(&"");
 
-        let with_commas: String = integer_part
+        // Handle negative sign separately
+        let (sign, digits) = if let Some(d) = integer_part.strip_prefix('-') {
+            ("-", d)
+        } else {
+            ("", integer_part)
+        };
+
+        let with_commas: String = digits
             .chars()
             .rev()
             .enumerate()
@@ -65,9 +72,9 @@ mod filters {
             .collect();
 
         if decimal_part.is_empty() {
-            with_commas
+            format!("{}{}", sign, with_commas)
         } else {
-            format!("{}.{}", with_commas, decimal_part)
+            format!("{}{}.{}", sign, with_commas, decimal_part)
         }
     }
 
@@ -134,6 +141,7 @@ struct TransactionsTemplate {
     account_type: String,
     transactions: Vec<TransactionView>,
     error: String,
+    explorer_url: String,
 }
 
 struct TransactionView {
@@ -223,14 +231,12 @@ async fn api_key_auth(
 
     match provided_key {
         Some(key) if key == *expected_key => next.run(request).await,
-        Some(_) => (
-            StatusCode::UNAUTHORIZED,
-            "Invalid API key",
-        ).into_response(),
+        Some(_) => (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
         None => (
             StatusCode::UNAUTHORIZED,
             "API key required. Provide via X-API-Key header or ?api_key= query parameter.",
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -315,7 +321,12 @@ fn resolve_api_key(cli_api_key: Option<String>) -> Option<String> {
     std::env::var("GRINGOTTS_API_KEY").ok()
 }
 
-pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bool, api_key: Option<String>) -> anyhow::Result<()> {
+pub async fn start_server(
+    port: u16,
+    refresh_interval: Option<String>,
+    eager: bool,
+    api_key: Option<String>,
+) -> anyhow::Result<()> {
     // Resolve refresh interval
     let interval = resolve_refresh_interval(refresh_interval)?;
 
@@ -348,7 +359,11 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
     });
 
     // Determine startup mode description
-    let startup_mode = if eager { "eager (fetching balances now)" } else { "lazy (serving cached data)" };
+    let startup_mode = if eager {
+        "eager (fetching balances now)"
+    } else {
+        "lazy (serving cached data)"
+    };
 
     // Routes that require authentication
     let protected_routes = Router::new()
@@ -361,7 +376,10 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .route("/api/wallets", get(get_wallets_json))
         .route("/api/companies", get(get_companies_json))
         .route("/api/balances", get(get_balances_json))
-        .route("/api/balances/company/:company", get(get_company_balances_json))
+        .route(
+            "/api/balances/company/:company",
+            get(get_company_balances_json),
+        )
         .route("/api/balances/:address", get(get_single_balance_json))
         .route("/api/totals", get(get_totals_json))
         .route("/api/totals/company/:company", get(get_company_totals_json))
@@ -370,8 +388,7 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
 
     // Public routes (no authentication required)
-    let public_routes = Router::new()
-        .route("/health", get(health_check));
+    let public_routes = Router::new().route("/health", get(health_check));
 
     let app = Router::new()
         .merge(protected_routes)
@@ -384,10 +401,19 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
     println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║                    Gringotts Web Server Started                          ║");
     println!("╠═══════════════════════════════════════════════════════════════════════════╣");
-    println!("║  Local:          http://localhost:{}                                   ║", port);
-    println!("║  Network:        http://<your-ip>:{}                                  ║", port);
+    println!(
+        "║  Local:          http://localhost:{}                                   ║",
+        port
+    );
+    println!(
+        "║  Network:        http://<your-ip>:{}                                  ║",
+        port
+    );
     println!("╠═══════════════════════════════════════════════════════════════════════════╣");
-    println!("║  Address Book:   {} wallets, {} bank accounts                          ║", wallet_count, bank_count);
+    println!(
+        "║  Address Book:   {} wallets, {} bank accounts                          ║",
+        wallet_count, bank_count
+    );
     println!("║  Cache:          ~/.gringotts/cache.json                                ║");
     println!("║  Last refresh:   {:>54} ║", cache_age);
     println!("║  Refresh every:  {:>54} ║", interval_display);
@@ -401,14 +427,27 @@ pub async fn start_server(port: u16, refresh_interval: Option<String>, eager: bo
 
     // If eager mode, perform initial refresh before starting the server
     if eager {
-        println!("[{}] Eager mode: fetching balances on startup...", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        println!(
+            "[{}] Eager mode: fetching balances on startup...",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
         if let Err(e) = refresh_all_balances(&state).await {
-            eprintln!("[{}] Warning: Initial balance fetch failed: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), e);
+            eprintln!(
+                "[{}] Warning: Initial balance fetch failed: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                e
+            );
         } else {
-            println!("[{}] Initial balance fetch completed", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+            println!(
+                "[{}] Initial balance fetch completed",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
         }
     } else {
-        println!("[{}] Lazy mode: serving cached data until first scheduled refresh", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        println!(
+            "[{}] Lazy mode: serving cached data until first scheduled refresh",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
     }
 
     // Spawn background refresh task
@@ -433,12 +472,22 @@ async fn background_refresh_task(state: Arc<AppState>, interval: Duration) {
     loop {
         ticker.tick().await;
 
-        println!("[{}] Starting background refresh...", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        println!(
+            "[{}] Starting background refresh...",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
 
         if let Err(e) = refresh_all_balances(&state).await {
-            eprintln!("[{}] Background refresh failed: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), e);
+            eprintln!(
+                "[{}] Background refresh failed: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                e
+            );
         } else {
-            println!("[{}] Background refresh completed", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+            println!(
+                "[{}] Background refresh completed",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
         }
     }
 }
@@ -489,11 +538,20 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                             tokens: cached_tokens,
                             total_usd_value: balances.total_usd_value,
                         };
-                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
                         success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} ({}): {}",
+                            timestamp,
+                            wallet.name,
+                            wallet.chain.display_name(),
+                            e
+                        );
                         failure_count += 1;
                     }
                 }
@@ -513,11 +571,20 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                             tokens: vec![],
                             total_usd_value: balances.total_usd_value,
                         };
-                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
                         success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} ({}): {}",
+                            timestamp,
+                            wallet.name,
+                            wallet.chain.display_name(),
+                            e
+                        );
                         failure_count += 1;
                     }
                 }
@@ -537,11 +604,20 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                             tokens: vec![],
                             total_usd_value: balances.total_usd_value,
                         };
-                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
                         success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} ({}): {}",
+                            timestamp,
+                            wallet.name,
+                            wallet.chain.display_name(),
+                            e
+                        );
                         failure_count += 1;
                     }
                 }
@@ -561,11 +637,20 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                             tokens: vec![],
                             total_usd_value: balances.total_usd_value,
                         };
-                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
                         success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} ({}): {}",
+                            timestamp,
+                            wallet.name,
+                            wallet.chain.display_name(),
+                            e
+                        );
                         failure_count += 1;
                     }
                 }
@@ -585,11 +670,20 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                             tokens: vec![],
                             total_usd_value: balances.total_usd_value,
                         };
-                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
                         success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} ({}): {}",
+                            timestamp,
+                            wallet.name,
+                            wallet.chain.display_name(),
+                            e
+                        );
                         failure_count += 1;
                     }
                 }
@@ -601,132 +695,157 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
             | Chain::Optimism
             | Chain::Avalanche
             | Chain::Base
-            | Chain::Core => {
-                match EvmClient::new(None, wallet.chain.clone()) {
-                    Ok(client) => {
-                        match client.get_balances(&wallet.address).await {
-                            Ok(balances) => {
-                                let native_symbol = wallet.chain.native_token_symbol();
-                                all_symbols.insert(native_symbol.to_string());
-                                let mut cached_tokens = vec![];
-                                for token in &balances.token_balances {
-                                    if let Some(symbol) = &token.symbol {
-                                        all_symbols.insert(symbol.clone());
-                                        cached_tokens.push(CachedToken {
-                                            symbol: symbol.clone(),
-                                            balance: token.ui_amount,
-                                            usd_value: token.usd_value,
-                                        });
-                                    }
-                                }
-                                let cached_balance = CachedBalance {
-                                    name: wallet.name.clone(),
-                                    address_or_id: wallet.address.clone(),
-                                    chain_or_service: wallet.chain.display_name().to_string(),
-                                    native_symbol: native_symbol.to_string(),
-                                    native_balance: balances.eth_balance,
-                                    native_usd_value: balances.eth_usd_value,
-                                    tokens: cached_tokens,
-                                    total_usd_value: balances.total_usd_value,
-                                };
-                                let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
-                                success_count += 1;
-                            }
-                            Err(e) => {
-                                eprintln!("[{}] Warning: Failed to query {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
-                                failure_count += 1;
+            | Chain::Core => match EvmClient::new(None, wallet.chain.clone()) {
+                Ok(client) => match client.get_balances(&wallet.address).await {
+                    Ok(balances) => {
+                        let native_symbol = wallet.chain.native_token_symbol();
+                        all_symbols.insert(native_symbol.to_string());
+                        let mut cached_tokens = vec![];
+                        for token in &balances.token_balances {
+                            if let Some(symbol) = &token.symbol {
+                                all_symbols.insert(symbol.clone());
+                                cached_tokens.push(CachedToken {
+                                    symbol: symbol.clone(),
+                                    balance: token.ui_amount,
+                                    usd_value: token.usd_value,
+                                });
                             }
                         }
+                        let cached_balance = CachedBalance {
+                            name: wallet.name.clone(),
+                            address_or_id: wallet.address.clone(),
+                            chain_or_service: wallet.chain.display_name().to_string(),
+                            native_symbol: native_symbol.to_string(),
+                            native_balance: balances.eth_balance,
+                            native_usd_value: balances.eth_usd_value,
+                            tokens: cached_tokens,
+                            total_usd_value: balances.total_usd_value,
+                        };
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
+                        success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to create EVM client for {} ({}): {}", timestamp, wallet.name, wallet.chain.display_name(), e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} ({}): {}",
+                            timestamp,
+                            wallet.name,
+                            wallet.chain.display_name(),
+                            e
+                        );
                         failure_count += 1;
                     }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[{}] Warning: Failed to create EVM client for {} ({}): {}",
+                        timestamp,
+                        wallet.name,
+                        wallet.chain.display_name(),
+                        e
+                    );
+                    failure_count += 1;
                 }
-            }
+            },
         }
     }
 
     // Query banking accounts
     for account in &book.banking_accounts {
         match &account.service {
-            BankingService::Mercury => {
-                match MercuryClient::new() {
-                    Ok(client) => {
-                        match client.get_account_balance(&account.account_id).await {
-                            Ok(balances) => {
-                                let cached_balance = CachedBalance {
-                                    name: account.name.clone(),
-                                    address_or_id: account.account_id.clone(),
-                                    chain_or_service: "Mercury Banking".to_string(),
-                                    native_symbol: "USD".to_string(),
-                                    native_balance: balances.current_balance,
-                                    native_usd_value: Some(balances.current_balance),
-                                    tokens: vec![],
-                                    total_usd_value: Some(balances.current_balance),
-                                };
-                                let _ = state.cache.update_balance(&account.name, cached_balance).await;
-                                success_count += 1;
-                            }
-                            Err(e) => {
-                                eprintln!("[{}] Warning: Failed to query {} (Mercury): {}", timestamp, account.name, e);
-                                failure_count += 1;
-                            }
-                        }
+            BankingService::Mercury => match MercuryClient::new() {
+                Ok(client) => match client.get_account_balance(&account.account_id).await {
+                    Ok(balances) => {
+                        let cached_balance = CachedBalance {
+                            name: account.name.clone(),
+                            address_or_id: account.account_id.clone(),
+                            chain_or_service: "Mercury Banking".to_string(),
+                            native_symbol: "USD".to_string(),
+                            native_balance: balances.current_balance,
+                            native_usd_value: Some(balances.current_balance),
+                            tokens: vec![],
+                            total_usd_value: Some(balances.current_balance),
+                        };
+                        let _ = state
+                            .cache
+                            .update_balance(&account.name, cached_balance)
+                            .await;
+                        success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to initialize Mercury client: {}", timestamp, e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} (Mercury): {}",
+                            timestamp, account.name, e
+                        );
                         failure_count += 1;
                     }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[{}] Warning: Failed to initialize Mercury client: {}",
+                        timestamp, e
+                    );
+                    failure_count += 1;
                 }
-            }
-            BankingService::Circle => {
-                match CircleClient::new() {
-                    Ok(client) => {
-                        match client.get_balances().await {
-                            Ok(balances) => {
-                                let mut cached_tokens = vec![];
-                                let mut total_usd = 0.0;
-                                for balance in &balances.available_balances {
-                                    let symbol = match balance.currency.as_str() {
-                                        "USD" => "USDC",
-                                        "EUR" => "EURC",
-                                        _ => &balance.currency,
-                                    };
-                                    if balance.currency == "USD" {
-                                        total_usd += balance.amount;
-                                    }
-                                    cached_tokens.push(CachedToken {
-                                        symbol: symbol.to_string(),
-                                        balance: balance.amount,
-                                        usd_value: if balance.currency == "USD" { Some(balance.amount) } else { None },
-                                    });
-                                }
-                                let cached_balance = CachedBalance {
-                                    name: account.name.clone(),
-                                    address_or_id: account.account_id.clone(),
-                                    chain_or_service: "Circle".to_string(),
-                                    native_symbol: "USD".to_string(),
-                                    native_balance: total_usd,
-                                    native_usd_value: Some(total_usd),
-                                    tokens: cached_tokens,
-                                    total_usd_value: Some(total_usd),
-                                };
-                                let _ = state.cache.update_balance(&account.name, cached_balance).await;
-                                success_count += 1;
+            },
+            BankingService::Circle => match CircleClient::new() {
+                Ok(client) => match client.get_balances().await {
+                    Ok(balances) => {
+                        let mut cached_tokens = vec![];
+                        let mut total_usd = 0.0;
+                        for balance in &balances.available_balances {
+                            let symbol = match balance.currency.as_str() {
+                                "USD" => "USDC",
+                                "EUR" => "EURC",
+                                _ => &balance.currency,
+                            };
+                            if balance.currency == "USD" {
+                                total_usd += balance.amount;
                             }
-                            Err(e) => {
-                                eprintln!("[{}] Warning: Failed to query {} (Circle): {}", timestamp, account.name, e);
-                                failure_count += 1;
-                            }
+                            cached_tokens.push(CachedToken {
+                                symbol: symbol.to_string(),
+                                balance: balance.amount,
+                                usd_value: if balance.currency == "USD" {
+                                    Some(balance.amount)
+                                } else {
+                                    None
+                                },
+                            });
                         }
+                        let cached_balance = CachedBalance {
+                            name: account.name.clone(),
+                            address_or_id: account.account_id.clone(),
+                            chain_or_service: "Circle".to_string(),
+                            native_symbol: "USD".to_string(),
+                            native_balance: total_usd,
+                            native_usd_value: Some(total_usd),
+                            tokens: cached_tokens,
+                            total_usd_value: Some(total_usd),
+                        };
+                        let _ = state
+                            .cache
+                            .update_balance(&account.name, cached_balance)
+                            .await;
+                        success_count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[{}] Warning: Failed to initialize Circle client: {}", timestamp, e);
+                        eprintln!(
+                            "[{}] Warning: Failed to query {} (Circle): {}",
+                            timestamp, account.name, e
+                        );
                         failure_count += 1;
                     }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[{}] Warning: Failed to initialize Circle client: {}",
+                        timestamp, e
+                    );
+                    failure_count += 1;
                 }
-            }
+            },
         }
     }
 
@@ -781,9 +900,18 @@ async fn manual_refresh(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .unwrap_or_default()
         .as_secs();
 
-    // Check rate limit
+    // Atomically check rate limit + in-progress, and set both if allowed
     {
-        let last_refresh = state.last_manual_refresh.read().await;
+        let mut in_progress = state.refresh_in_progress.write().await;
+        if *in_progress {
+            let response = serde_json::json!({
+                "status": "already_in_progress",
+                "message": "A refresh is already in progress"
+            });
+            return (StatusCode::OK, axum::Json(response));
+        }
+
+        let mut last_refresh = state.last_manual_refresh.write().await;
         if let Some(last_ts) = *last_refresh {
             let elapsed = now.saturating_sub(last_ts);
             if elapsed < MANUAL_REFRESH_RATE_LIMIT_SECS {
@@ -796,27 +924,9 @@ async fn manual_refresh(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 return (StatusCode::TOO_MANY_REQUESTS, axum::Json(response));
             }
         }
-    }
 
-    // Check if refresh is already in progress
-    {
-        let in_progress = state.refresh_in_progress.read().await;
-        if *in_progress {
-            let response = serde_json::json!({
-                "status": "already_in_progress",
-                "message": "A refresh is already in progress"
-            });
-            return (StatusCode::OK, axum::Json(response));
-        }
-    }
-
-    // Mark refresh as in progress and update last refresh time
-    {
-        let mut in_progress = state.refresh_in_progress.write().await;
+        // Both checks passed - atomically set both flags
         *in_progress = true;
-    }
-    {
-        let mut last_refresh = state.last_manual_refresh.write().await;
         *last_refresh = Some(now);
     }
 
@@ -952,7 +1062,10 @@ async fn get_balances_json(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     .filter_map(|w| w.get("total_usd_value").and_then(|v| v.as_f64()))
                     .sum();
                 if let Some(obj) = company_data.as_object_mut() {
-                    obj.insert("total_usd_value".to_string(), serde_json::json!(company_total));
+                    obj.insert(
+                        "total_usd_value".to_string(),
+                        serde_json::json!(company_total),
+                    );
                 }
             }
         }
@@ -999,12 +1112,29 @@ async fn get_single_balance_json(
 
     // Find wallet by address (check both wallet addresses and banking account IDs)
     let wallet = book.addresses.iter().find(|w| w.address == address);
-    let banking = book.banking_accounts.iter().find(|a| a.account_id == address);
+    let banking = book
+        .banking_accounts
+        .iter()
+        .find(|a| a.account_id == address);
 
     // Determine name and company based on what was found
     let (name, company) = match (wallet, banking) {
-        (Some(w), _) => (w.name.clone(), if w.company.is_empty() { "Uncategorized".to_string() } else { w.company.clone() }),
-        (_, Some(a)) => (a.name.clone(), if a.company.is_empty() { "Uncategorized".to_string() } else { a.company.clone() }),
+        (Some(w), _) => (
+            w.name.clone(),
+            if w.company.is_empty() {
+                "Uncategorized".to_string()
+            } else {
+                w.company.clone()
+            },
+        ),
+        (_, Some(a)) => (
+            a.name.clone(),
+            if a.company.is_empty() {
+                "Uncategorized".to_string()
+            } else {
+                a.company.clone()
+            },
+        ),
         (None, None) => {
             let error = serde_json::json!({
                 "error": "Address not found in address book"
@@ -1283,7 +1413,10 @@ async fn get_totals_json(State(state): State<Arc<AppState>>) -> impl IntoRespons
             account.company.clone()
         };
         name_to_company.insert(account.name.clone(), company);
-        name_to_chain.insert(account.name.clone(), account.service.display_name().to_string());
+        name_to_chain.insert(
+            account.name.clone(),
+            account.service.display_name().to_string(),
+        );
     }
 
     let cache = state.cache.read().await;
@@ -1344,9 +1477,17 @@ async fn get_totals_json(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .collect();
     chain_totals.sort_by(|a, b| {
-        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+        let val_a = a
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let val_b = b
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        val_b
+            .partial_cmp(&val_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Convert by_token to sorted vec of objects
@@ -1361,9 +1502,17 @@ async fn get_totals_json(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .collect();
     token_totals.sort_by(|a, b| {
-        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+        let val_a = a
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let val_b = b
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        val_b
+            .partial_cmp(&val_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Convert by_company to sorted vec of objects
@@ -1377,9 +1526,17 @@ async fn get_totals_json(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .collect();
     company_totals.sort_by(|a, b| {
-        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+        let val_a = a
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let val_b = b
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        val_b
+            .partial_cmp(&val_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Format last refresh timestamp as ISO 8601
@@ -1471,7 +1628,10 @@ async fn get_company_totals_json(
         name_to_chain.insert(wallet.name.clone(), wallet.chain.display_name().to_string());
     }
     for account in &book.banking_accounts {
-        name_to_chain.insert(account.name.clone(), account.service.display_name().to_string());
+        name_to_chain.insert(
+            account.name.clone(),
+            account.service.display_name().to_string(),
+        );
     }
 
     let cache = state.cache.read().await;
@@ -1526,9 +1686,17 @@ async fn get_company_totals_json(
         })
         .collect();
     chain_totals.sort_by(|a, b| {
-        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+        let val_a = a
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let val_b = b
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        val_b
+            .partial_cmp(&val_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Convert by_token to sorted vec of objects
@@ -1543,9 +1711,17 @@ async fn get_company_totals_json(
         })
         .collect();
     token_totals.sort_by(|a, b| {
-        let val_a = a.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let val_b = b.get("total_usd_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+        let val_a = a
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let val_b = b
+            .get("total_usd_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        val_b
+            .partial_cmp(&val_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Use the original company name from the first matching wallet for display
@@ -1620,7 +1796,10 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
             (last_dt, format_duration(Duration::from_secs(next_in)))
         }
-        None => ("never".to_string(), format_duration(Duration::from_secs(state.refresh_interval_secs))),
+        None => (
+            "never".to_string(),
+            format_duration(Duration::from_secs(state.refresh_interval_secs)),
+        ),
     };
 
     let status = serde_json::json!({
@@ -1819,13 +1998,22 @@ async fn index() -> impl IntoResponse {
         bank_count,
     };
 
-    Html(template.render().unwrap_or_else(|e| format!("Template error: {}", e)))
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
+    )
 }
 
 async fn add_account(Form(form): Form<AddAccountForm>) -> impl IntoResponse {
     let mut book = match AddressBook::load() {
         Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("Error: {}", e))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html(format!("Error: {}", e)),
+            )
+        }
     };
 
     let chain_opt = if form.chain.is_empty() {
@@ -1857,7 +2045,10 @@ async fn add_account(Form(form): Form<AddAccountForm>) -> impl IntoResponse {
     }
 
     if let Err(e) = book.save() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("Error: {}", e)));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("Error: {}", e)),
+        );
     }
 
     let template = AccountRowTemplate {
@@ -1873,7 +2064,12 @@ async fn add_account(Form(form): Form<AddAccountForm>) -> impl IntoResponse {
 async fn remove_account(Path(name): Path<String>) -> impl IntoResponse {
     let mut book = match AddressBook::load() {
         Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("Error: {}", e))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html(format!("Error: {}", e)),
+            )
+        }
     };
 
     // Try removing from addresses first
@@ -1891,7 +2087,10 @@ async fn remove_account(Path(name): Path<String>) -> impl IntoResponse {
     }
 
     if let Err(e) = book.save() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("Error: {}", e)));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("Error: {}", e)),
+        );
     }
 
     // Return empty to remove the row
@@ -1972,7 +2171,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                         tokens: cached_tokens,
                         total_usd_value: balances.total_usd_value,
                     };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                    let _ = state
+                        .cache
+                        .update_balance(&wallet.name, cached_balance)
+                        .await;
                 }
             }
             Chain::Near => {
@@ -1999,7 +2201,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                         tokens: vec![],
                         total_usd_value: balances.total_usd_value,
                     };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                    let _ = state
+                        .cache
+                        .update_balance(&wallet.name, cached_balance)
+                        .await;
                 }
             }
             Chain::Aptos => {
@@ -2026,7 +2231,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                         tokens: vec![],
                         total_usd_value: balances.total_usd_value,
                     };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                    let _ = state
+                        .cache
+                        .update_balance(&wallet.name, cached_balance)
+                        .await;
                 }
             }
             Chain::Sui => {
@@ -2053,7 +2261,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                         tokens: vec![],
                         total_usd_value: balances.total_usd_value,
                     };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                    let _ = state
+                        .cache
+                        .update_balance(&wallet.name, cached_balance)
+                        .await;
                 }
             }
             Chain::Starknet => {
@@ -2080,7 +2291,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                         tokens: vec![],
                         total_usd_value: balances.total_usd_value,
                     };
-                    let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                    let _ = state
+                        .cache
+                        .update_balance(&wallet.name, cached_balance)
+                        .await;
                 }
             }
             // EVM chains
@@ -2131,7 +2345,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                             tokens: cached_tokens,
                             total_usd_value: balances.total_usd_value,
                         };
-                        let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&wallet.name, cached_balance)
+                            .await;
                     }
                 }
             }
@@ -2165,7 +2382,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                             tokens: vec![],
                             total_usd_value: Some(balances.current_balance),
                         };
-                        let _ = state.cache.update_balance(&account.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&account.name, cached_balance)
+                            .await;
                     }
                 }
             }
@@ -2186,7 +2406,8 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                                 "EUR" => "EURC",
                                 _ => &balance.currency,
                             };
-                            let currency_entry = entry.entry(symbol.to_string()).or_insert((0.0, 0.0));
+                            let currency_entry =
+                                entry.entry(symbol.to_string()).or_insert((0.0, 0.0));
                             currency_entry.0 += balance.amount;
                             if balance.currency == "USD" {
                                 currency_entry.1 += balance.amount;
@@ -2195,7 +2416,11 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                             cached_tokens.push(CachedToken {
                                 symbol: symbol.to_string(),
                                 balance: balance.amount,
-                                usd_value: if balance.currency == "USD" { Some(balance.amount) } else { None },
+                                usd_value: if balance.currency == "USD" {
+                                    Some(balance.amount)
+                                } else {
+                                    None
+                                },
                             });
                         }
 
@@ -2210,7 +2435,10 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                             tokens: cached_tokens,
                             total_usd_value: Some(total_usd),
                         };
-                        let _ = state.cache.update_balance(&account.name, cached_balance).await;
+                        let _ = state
+                            .cache
+                            .update_balance(&account.name, cached_balance)
+                            .await;
                     }
                 }
             }
@@ -2438,7 +2666,7 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
                 match client.get_balances(&wallet.address).await {
                     Ok(balances) => {
                         native_balance = balances.eth_balance;
-                        if let Some(&price) = price_cache.get("ETH") {
+                        if let Some(&price) = price_cache.get(&balances.native_symbol) {
                             native_usd = native_balance * price;
                             total_usd += native_usd;
                         }
@@ -2466,7 +2694,11 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
     }
 
     // Sort tokens by USD value
-    tokens.sort_by(|a, b| b.usd_value.partial_cmp(&a.usd_value).unwrap_or(std::cmp::Ordering::Equal));
+    tokens.sort_by(|a, b| {
+        b.usd_value
+            .partial_cmp(&a.usd_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Html(
         SingleBalanceTemplate {
@@ -2489,43 +2721,88 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
     let service_name = account.service.display_name().to_string();
 
     match &account.service {
-        BankingService::Mercury => {
-            match MercuryClient::new() {
-                Ok(client) => {
-                    match client.get_account_balance(&account.account_id).await {
-                        Ok(balances) => {
-                            Html(
-                                SingleBalanceTemplate {
-                                    name: account.name.clone(),
-                                    address: account.account_id.clone(),
-                                    chain: service_name,
-                                    native_symbol: "USD".to_string(),
-                                    native_balance: balances.current_balance,
-                                    native_usd: balances.current_balance,
-                                    tokens: vec![],
-                                    total_usd: balances.current_balance,
-                                    error: String::new(),
-                                }
-                                .render()
-                                .unwrap_or_default(),
-                            )
-                        }
-                        Err(e) => Html(
-                            SingleBalanceTemplate {
-                                name: account.name.clone(),
-                                address: account.account_id.clone(),
-                                chain: service_name,
-                                native_symbol: String::new(),
-                                native_balance: 0.0,
-                                native_usd: 0.0,
-                                tokens: vec![],
-                                total_usd: 0.0,
-                                error: format!("Failed to query: {}", e),
-                            }
-                            .render()
-                            .unwrap_or_default(),
-                        ),
+        BankingService::Mercury => match MercuryClient::new() {
+            Ok(client) => match client.get_account_balance(&account.account_id).await {
+                Ok(balances) => Html(
+                    SingleBalanceTemplate {
+                        name: account.name.clone(),
+                        address: account.account_id.clone(),
+                        chain: service_name,
+                        native_symbol: "USD".to_string(),
+                        native_balance: balances.current_balance,
+                        native_usd: balances.current_balance,
+                        tokens: vec![],
+                        total_usd: balances.current_balance,
+                        error: String::new(),
                     }
+                    .render()
+                    .unwrap_or_default(),
+                ),
+                Err(e) => Html(
+                    SingleBalanceTemplate {
+                        name: account.name.clone(),
+                        address: account.account_id.clone(),
+                        chain: service_name,
+                        native_symbol: String::new(),
+                        native_balance: 0.0,
+                        native_usd: 0.0,
+                        tokens: vec![],
+                        total_usd: 0.0,
+                        error: format!("Failed to query: {}", e),
+                    }
+                    .render()
+                    .unwrap_or_default(),
+                ),
+            },
+            Err(e) => Html(
+                SingleBalanceTemplate {
+                    name: account.name.clone(),
+                    address: account.account_id.clone(),
+                    chain: service_name,
+                    native_symbol: String::new(),
+                    native_balance: 0.0,
+                    native_usd: 0.0,
+                    tokens: vec![],
+                    total_usd: 0.0,
+                    error: format!("Failed to initialize client: {}", e),
+                }
+                .render()
+                .unwrap_or_default(),
+            ),
+        },
+        BankingService::Circle => match CircleClient::new() {
+            Ok(client) => match client.get_balances().await {
+                Ok(balances) => {
+                    let mut tokens: Vec<TokenView> = vec![];
+                    let mut total = 0.0;
+                    for bal in &balances.available_balances {
+                        let usd = if bal.currency == "USD" {
+                            bal.amount
+                        } else {
+                            0.0
+                        };
+                        total += usd;
+                        tokens.push(TokenView {
+                            symbol: bal.currency.clone(),
+                            balance: bal.amount,
+                            usd_value: usd,
+                        });
+                    }
+                    Html(
+                        SingleBalanceTemplate {
+                            name: account.name.clone(),
+                            address: account.account_id.clone(),
+                            chain: service_name,
+                            native_symbol: "USD".to_string(),
+                            native_balance: total,
+                            native_usd: total,
+                            tokens,
+                            total_usd: total,
+                            error: String::new(),
+                        }
+                        .render()
+                        .unwrap_or_default(),
+                    )
                 }
                 Err(e) => Html(
                     SingleBalanceTemplate {
@@ -2537,79 +2814,28 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                         native_usd: 0.0,
                         tokens: vec![],
                         total_usd: 0.0,
-                        error: format!("Failed to initialize client: {}", e),
+                        error: format!("Failed to query: {}", e),
                     }
                     .render()
                     .unwrap_or_default(),
                 ),
-            }
-        }
-        BankingService::Circle => {
-            match CircleClient::new() {
-                Ok(client) => {
-                    match client.get_balances().await {
-                        Ok(balances) => {
-                            let mut tokens: Vec<TokenView> = vec![];
-                            let mut total = 0.0;
-                            for bal in &balances.available_balances {
-                                let usd = if bal.currency == "USD" { bal.amount } else { 0.0 };
-                                total += usd;
-                                tokens.push(TokenView {
-                                    symbol: bal.currency.clone(),
-                                    balance: bal.amount,
-                                    usd_value: usd,
-                                });
-                            }
-                            Html(
-                                SingleBalanceTemplate {
-                                    name: account.name.clone(),
-                                    address: account.account_id.clone(),
-                                    chain: service_name,
-                                    native_symbol: "USD".to_string(),
-                                    native_balance: total,
-                                    native_usd: total,
-                                    tokens,
-                                    total_usd: total,
-                                    error: String::new(),
-                                }
-                                .render()
-                                .unwrap_or_default(),
-                            )
-                        }
-                        Err(e) => Html(
-                            SingleBalanceTemplate {
-                                name: account.name.clone(),
-                                address: account.account_id.clone(),
-                                chain: service_name,
-                                native_symbol: String::new(),
-                                native_balance: 0.0,
-                                native_usd: 0.0,
-                                tokens: vec![],
-                                total_usd: 0.0,
-                                error: format!("Failed to query: {}", e),
-                            }
-                            .render()
-                            .unwrap_or_default(),
-                        ),
-                    }
+            },
+            Err(e) => Html(
+                SingleBalanceTemplate {
+                    name: account.name.clone(),
+                    address: account.account_id.clone(),
+                    chain: service_name,
+                    native_symbol: String::new(),
+                    native_balance: 0.0,
+                    native_usd: 0.0,
+                    tokens: vec![],
+                    total_usd: 0.0,
+                    error: format!("Failed to initialize client: {}", e),
                 }
-                Err(e) => Html(
-                    SingleBalanceTemplate {
-                        name: account.name.clone(),
-                        address: account.account_id.clone(),
-                        chain: service_name,
-                        native_symbol: String::new(),
-                        native_balance: 0.0,
-                        native_usd: 0.0,
-                        tokens: vec![],
-                        total_usd: 0.0,
-                        error: format!("Failed to initialize client: {}", e),
-                    }
-                    .render()
-                    .unwrap_or_default(),
-                ),
-            }
-        }
+                .render()
+                .unwrap_or_default(),
+            ),
+        },
     }
 }
 
@@ -2623,6 +2849,7 @@ async fn get_transactions(Path(name): Path<String>) -> impl IntoResponse {
                     account_type: String::new(),
                     transactions: vec![],
                     error: format!("Failed to load accounts: {}", e),
+                    explorer_url: String::new(),
                 }
                 .render()
                 .unwrap_or_default(),
@@ -2646,6 +2873,7 @@ async fn get_transactions(Path(name): Path<String>) -> impl IntoResponse {
             account_type: String::new(),
             transactions: vec![],
             error: format!("Account '{}' not found", name),
+            explorer_url: String::new(),
         }
         .render()
         .unwrap_or_default(),
@@ -2657,7 +2885,10 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
         BankingService::Mercury => {
             match MercuryClient::new() {
                 Ok(client) => {
-                    match client.get_transactions(&account.account_id, None, None).await {
+                    match client
+                        .get_transactions(&account.account_id, None, None)
+                        .await
+                    {
                         Ok(txs) => {
                             let transactions: Vec<TransactionView> = txs
                                 .iter()
@@ -2676,7 +2907,8 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
                                         "withdrawal".to_string()
                                     };
 
-                                    let description = tx.bank_description
+                                    let description = tx
+                                        .bank_description
                                         .clone()
                                         .or(tx.note.clone())
                                         .or(tx.external_memo.clone())
@@ -2689,7 +2921,10 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
                                         currency: "USD".to_string(),
                                         tx_type,
                                         status: tx.status.clone(),
-                                        counterparty: tx.counterparty_name.clone().unwrap_or_default(),
+                                        counterparty: tx
+                                            .counterparty_name
+                                            .clone()
+                                            .unwrap_or_default(),
                                     }
                                 })
                                 .collect();
@@ -2700,6 +2935,7 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
                                     account_type: "Mercury Banking".to_string(),
                                     transactions,
                                     error: String::new(),
+                                    explorer_url: String::new(),
                                 }
                                 .render()
                                 .unwrap_or_default(),
@@ -2711,6 +2947,7 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
                                 account_type: "Mercury Banking".to_string(),
                                 transactions: vec![],
                                 error: format!("Failed to fetch transactions: {}", e),
+                                explorer_url: String::new(),
                             }
                             .render()
                             .unwrap_or_default(),
@@ -2723,24 +2960,24 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
                         account_type: "Mercury Banking".to_string(),
                         transactions: vec![],
                         error: format!("Failed to initialize client: {}", e),
+                        explorer_url: String::new(),
                     }
                     .render()
                     .unwrap_or_default(),
                 ),
             }
         }
-        BankingService::Circle => {
-            Html(
-                TransactionsTemplate {
-                    name: account.name.clone(),
-                    account_type: "Circle".to_string(),
-                    transactions: vec![],
-                    error: "Transaction history not available for Circle accounts".to_string(),
-                }
-                .render()
-                .unwrap_or_default(),
-            )
-        }
+        BankingService::Circle => Html(
+            TransactionsTemplate {
+                name: account.name.clone(),
+                account_type: "Circle".to_string(),
+                transactions: vec![],
+                error: "Transaction history not available for Circle accounts".to_string(),
+                explorer_url: String::new(),
+            }
+            .render()
+            .unwrap_or_default(),
+        ),
     }
 }
 
@@ -2770,7 +3007,8 @@ async fn get_wallet_transactions(wallet: &crate::storage::WalletAddress) -> Html
                 let transactions: Vec<TransactionView> = txs
                     .iter()
                     .map(|tx| {
-                        let date = tx.timestamp
+                        let date = tx
+                            .timestamp
                             .map(|ts| {
                                 chrono::DateTime::from_timestamp(ts, 0)
                                     .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
@@ -2779,9 +3017,10 @@ async fn get_wallet_transactions(wallet: &crate::storage::WalletAddress) -> Html
                             .unwrap_or_else(|| "Pending".to_string());
 
                         let status = if tx.success { "Completed" } else { "Failed" };
-                        let description = tx.memo.clone().unwrap_or_else(|| {
-                            format!("Slot {}", tx.slot)
-                        });
+                        let description = tx
+                            .memo
+                            .clone()
+                            .unwrap_or_else(|| format!("Slot {}", tx.slot));
 
                         // Link to explorer for signature
                         let sig_short = if tx.signature.len() > 16 {
@@ -2813,7 +3052,9 @@ async fn get_wallet_transactions(wallet: &crate::storage::WalletAddress) -> Html
                         name: wallet.name.clone(),
                         account_type: format!("{} Wallet", chain_name),
                         transactions,
-                        error: format!("Note: For detailed transaction info, visit <a href=\"{}\" target=\"_blank\">Solscan</a>", explorer_url),
+                        error: "Note: For detailed transaction info, visit the block explorer."
+                            .to_string(),
+                        explorer_url: explorer_url.clone(),
                     }
                     .render()
                     .unwrap_or_default(),
@@ -2825,7 +3066,8 @@ async fn get_wallet_transactions(wallet: &crate::storage::WalletAddress) -> Html
                         name: wallet.name.clone(),
                         account_type: format!("{} Wallet", chain_name),
                         transactions: vec![],
-                        error: format!("Failed to fetch transactions: {}. <a href=\"{}\" target=\"_blank\">View on Solscan</a>", e, explorer_url),
+                        error: format!("Failed to fetch transactions: {}", e),
+                        explorer_url: explorer_url.clone(),
                     }
                     .render()
                     .unwrap_or_default(),
@@ -2840,13 +3082,13 @@ async fn get_wallet_transactions(wallet: &crate::storage::WalletAddress) -> Html
             name: wallet.name.clone(),
             account_type: format!("{} Wallet", chain_name),
             transactions: vec![],
-            error: format!("View transaction history on the block explorer: <a href=\"{}\" target=\"_blank\">{}</a>", explorer_url, explorer_url),
+            error: "View transaction history on the block explorer.".to_string(),
+            explorer_url,
         }
         .render()
         .unwrap_or_default(),
     )
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2858,47 +3100,101 @@ mod tests {
         assert_eq!(parse_duration("30sec").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration("30secs").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration("30second").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("30seconds").unwrap(), Duration::from_secs(30));
+        assert_eq!(
+            parse_duration("30seconds").unwrap(),
+            Duration::from_secs(30)
+        );
         assert_eq!(parse_duration("30").unwrap(), Duration::from_secs(30));
     }
 
     #[test]
     fn test_parse_duration_minutes() {
         assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(30 * 60));
-        assert_eq!(parse_duration("30min").unwrap(), Duration::from_secs(30 * 60));
-        assert_eq!(parse_duration("30mins").unwrap(), Duration::from_secs(30 * 60));
-        assert_eq!(parse_duration("30minute").unwrap(), Duration::from_secs(30 * 60));
-        assert_eq!(parse_duration("30minutes").unwrap(), Duration::from_secs(30 * 60));
+        assert_eq!(
+            parse_duration("30min").unwrap(),
+            Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            parse_duration("30mins").unwrap(),
+            Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            parse_duration("30minute").unwrap(),
+            Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            parse_duration("30minutes").unwrap(),
+            Duration::from_secs(30 * 60)
+        );
     }
 
     #[test]
     fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("4h").unwrap(), Duration::from_secs(4 * 60 * 60));
-        assert_eq!(parse_duration("4hr").unwrap(), Duration::from_secs(4 * 60 * 60));
-        assert_eq!(parse_duration("4hrs").unwrap(), Duration::from_secs(4 * 60 * 60));
-        assert_eq!(parse_duration("4hour").unwrap(), Duration::from_secs(4 * 60 * 60));
-        assert_eq!(parse_duration("4hours").unwrap(), Duration::from_secs(4 * 60 * 60));
+        assert_eq!(
+            parse_duration("4h").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("4hr").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("4hrs").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("4hour").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("4hours").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
     }
 
     #[test]
     fn test_parse_duration_days() {
-        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(24 * 60 * 60));
-        assert_eq!(parse_duration("1day").unwrap(), Duration::from_secs(24 * 60 * 60));
-        assert_eq!(parse_duration("1days").unwrap(), Duration::from_secs(24 * 60 * 60));
-        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(
+            parse_duration("1d").unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("1day").unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("1days").unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("7d").unwrap(),
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
     }
 
     #[test]
     fn test_parse_duration_whitespace() {
-        assert_eq!(parse_duration("  4h  ").unwrap(), Duration::from_secs(4 * 60 * 60));
-        assert_eq!(parse_duration("4 h").unwrap(), Duration::from_secs(4 * 60 * 60));
+        assert_eq!(
+            parse_duration("  4h  ").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("4 h").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
     }
 
     #[test]
     fn test_parse_duration_case_insensitive() {
-        assert_eq!(parse_duration("4H").unwrap(), Duration::from_secs(4 * 60 * 60));
+        assert_eq!(
+            parse_duration("4H").unwrap(),
+            Duration::from_secs(4 * 60 * 60)
+        );
         assert_eq!(parse_duration("30M").unwrap(), Duration::from_secs(30 * 60));
-        assert_eq!(parse_duration("1D").unwrap(), Duration::from_secs(24 * 60 * 60));
+        assert_eq!(
+            parse_duration("1D").unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
     }
 
     #[test]
@@ -2930,7 +3226,7 @@ mod tests {
     fn test_resolve_refresh_interval_default() {
         // Clear any env var that might be set
         std::env::remove_var("GRINGOTTS_REFRESH_INTERVAL");
-        
+
         let result = resolve_refresh_interval(None).unwrap();
         assert_eq!(result, Duration::from_secs(DEFAULT_REFRESH_INTERVAL_SECS));
     }
@@ -2939,10 +3235,10 @@ mod tests {
     fn test_resolve_refresh_interval_env_var() {
         // Set env var
         std::env::set_var("GRINGOTTS_REFRESH_INTERVAL", "2h");
-        
+
         let result = resolve_refresh_interval(None).unwrap();
         assert_eq!(result, Duration::from_secs(2 * 60 * 60));
-        
+
         // Clean up
         std::env::remove_var("GRINGOTTS_REFRESH_INTERVAL");
     }
@@ -3003,7 +3299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_response() {
-        use crate::cache::SharedCache;
+        use crate::services::cache::SharedCache;
         use axum::extract::State;
 
         // Create app state with fresh cache
@@ -3025,7 +3321,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_with_refresh() {
-        use crate::cache::SharedCache;
+        use crate::services::cache::SharedCache;
         use axum::extract::State;
 
         // Create app state with fresh cache
@@ -3052,7 +3348,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_balances_json_response_structure() {
-        use crate::cache::{CachedBalance, CachedToken, SharedCache};
+        use crate::services::cache::{CachedBalance, CachedToken, SharedCache};
         use axum::extract::State;
 
         // Create app state with fresh cache
@@ -3073,7 +3369,10 @@ mod tests {
             }],
             total_usd_value: Some(1500.0),
         };
-        cache.update_balance("Test Wallet", test_balance).await.unwrap();
+        cache
+            .update_balance("Test Wallet", test_balance)
+            .await
+            .unwrap();
 
         // Mark a refresh
         cache.mark_refresh().await.unwrap();

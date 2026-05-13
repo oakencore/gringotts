@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 use base64::prelude::*;
 use mpl_token_metadata::accounts::Metadata;
 use solana_account_decoder_client_types::UiAccountData;
-use solana_client::rpc_client::{RpcClient, GetConfirmedSignaturesForAddress2Config};
+use solana_client::rpc_client::{GetConfirmedSignaturesForAddress2Config, RpcClient};
 use solana_client::rpc_config::RpcTransactionConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::program_pack::Pack;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status_client_types::UiTransactionEncoding;
+use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
-use std::collections::HashMap;
 
 const HELIUS_RPC_TEMPLATE: &str = "https://mainnet.helius-rpc.com/?api-key={}";
 const SOLANA_PUBLIC_RPC: &str = "https://api.mainnet-beta.solana.com";
@@ -74,21 +74,17 @@ impl SolanaClient {
 
     fn get_token_metadata(&self, mint: &Pubkey) -> Option<(String, String)> {
         // Derive the metadata PDA for this mint
-        let metadata_seeds = &[
-            b"metadata",
-            mpl_token_metadata::ID.as_ref(),
-            mint.as_ref(),
-        ];
+        let metadata_seeds = &[b"metadata", mpl_token_metadata::ID.as_ref(), mint.as_ref()];
 
-        let (metadata_pda, _) = Pubkey::find_program_address(
-            metadata_seeds,
-            &mpl_token_metadata::ID,
-        );
+        let (metadata_pda, _) =
+            Pubkey::find_program_address(metadata_seeds, &mpl_token_metadata::ID);
 
         // Try to fetch the metadata account
         if let Ok(account_data) = self.client.get_account_data(&metadata_pda) {
             if let Ok(metadata) = Metadata::from_bytes(&account_data) {
-                return Some((metadata.name.trim_matches('\0').to_string(), metadata.symbol.trim_matches('\0').to_string()));
+                let name = metadata.name.replace('\0', "").trim().to_string();
+                let symbol = metadata.symbol.replace('\0', "").trim().to_string();
+                return Some((name, symbol));
             }
         }
 
@@ -105,23 +101,43 @@ impl SolanaClient {
     }
 
     pub fn get_balances(&self, address: &str) -> Result<AccountBalances> {
-        let pubkey = Pubkey::from_str(address)
-            .context("Invalid Solana address")?;
+        let pubkey = Pubkey::from_str(address).context("Invalid Solana address")?;
 
         // Get SOL balance
-        let lamports = self.client
+        let lamports = self
+            .client
             .get_balance(&pubkey)
             .context("Failed to fetch SOL balance")?;
         let sol_balance = lamports as f64 / 1_000_000_000.0;
 
-        // Get token accounts
-        let token_accounts = self.client
-            .get_token_accounts_by_owner(&pubkey, solana_client::rpc_request::TokenAccountsFilter::ProgramId(spl_token::id()))
+        // Get token accounts from both SPL Token and Token-2022 programs
+        let token_accounts = self
+            .client
+            .get_token_accounts_by_owner(
+                &pubkey,
+                solana_client::rpc_request::TokenAccountsFilter::ProgramId(spl_token::id()),
+            )
             .context("Failed to fetch token accounts")?;
+
+        // Token-2022 program ID
+        let token_2022_id =
+            Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+        let token_2022_accounts = self
+            .client
+            .get_token_accounts_by_owner(
+                &pubkey,
+                solana_client::rpc_request::TokenAccountsFilter::ProgramId(token_2022_id),
+            )
+            .unwrap_or_default();
+
+        let all_token_accounts: Vec<_> = token_accounts
+            .into_iter()
+            .chain(token_2022_accounts)
+            .collect();
 
         let mut token_balances = Vec::new();
 
-        for account in token_accounts {
+        for account in all_token_accounts {
             // Handle different UiAccountData formats
             match &account.account.data {
                 UiAccountData::Binary(data, _encoding) => {
@@ -131,8 +147,17 @@ impl SolanaClient {
                         if let Ok(token_account) = spl_token::state::Account::unpack(&decoded) {
                             let mint_pubkey = token_account.mint;
 
-                            // Fetch decimals from mint
-                            let decimals = self.get_mint_decimals(&mint_pubkey).unwrap_or(0);
+                            // Fetch decimals from mint - skip token if decimals unavailable
+                            let decimals = match self.get_mint_decimals(&mint_pubkey) {
+                                Some(d) => d,
+                                None => {
+                                    eprintln!(
+                                        "Warning: Could not fetch decimals for mint {}, skipping",
+                                        mint_pubkey
+                                    );
+                                    continue;
+                                }
+                            };
 
                             // Calculate UI amount
                             let ui_amount = if decimals > 0 {
@@ -142,7 +167,8 @@ impl SolanaClient {
                             };
 
                             // Try to fetch metadata
-                            let (name, symbol) = self.get_token_metadata(&mint_pubkey)
+                            let (name, symbol) = self
+                                .get_token_metadata(&mint_pubkey)
                                 .map(|(n, s)| (Some(n), Some(s)))
                                 .unwrap_or((None, None));
 
@@ -161,32 +187,39 @@ impl SolanaClient {
                 UiAccountData::Json(parsed) => {
                     // Handle JSON parsed account data
                     if let Some(info) = parsed.parsed.as_object() {
-                        if let (Some(info_obj), Some(type_str)) =
-                            (info.get("info").and_then(|v| v.as_object()), info.get("type").and_then(|v| v.as_str())) {
+                        if let (Some(info_obj), Some(type_str)) = (
+                            info.get("info").and_then(|v| v.as_object()),
+                            info.get("type").and_then(|v| v.as_str()),
+                        ) {
                             if type_str == "account" {
-                                let mint = info_obj.get("mint")
+                                let mint = info_obj
+                                    .get("mint")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown")
                                     .to_string();
-                                let decimals = info_obj.get("tokenAmount")
+                                let decimals = info_obj
+                                    .get("tokenAmount")
                                     .and_then(|v| v.as_object())
                                     .and_then(|ta| ta.get("decimals"))
                                     .and_then(|d| d.as_u64())
-                                    .unwrap_or(0) as u8;
-                                let ui_amount = info_obj.get("tokenAmount")
+                                    .unwrap_or(0)
+                                    as u8;
+                                let ui_amount = info_obj
+                                    .get("tokenAmount")
                                     .and_then(|v| v.as_object())
                                     .and_then(|ta| ta.get("uiAmount"))
                                     .and_then(|u| u.as_f64())
                                     .unwrap_or(0.0);
 
                                 // Try to fetch metadata
-                                let (name, symbol) = if let Ok(mint_pubkey) = Pubkey::from_str(&mint) {
-                                    self.get_token_metadata(&mint_pubkey)
-                                        .map(|(n, s)| (Some(n), Some(s)))
-                                        .unwrap_or((None, None))
-                                } else {
-                                    (None, None)
-                                };
+                                let (name, symbol) =
+                                    if let Ok(mint_pubkey) = Pubkey::from_str(&mint) {
+                                        self.get_token_metadata(&mint_pubkey)
+                                            .map(|(n, s)| (Some(n), Some(s)))
+                                            .unwrap_or((None, None))
+                                    } else {
+                                        (None, None)
+                                    };
 
                                 token_balances.push(TokenBalance {
                                     mint,
@@ -215,8 +248,7 @@ impl SolanaClient {
     }
 
     pub fn get_transactions(&self, address: &str, limit: usize) -> Result<Vec<SolanaTransaction>> {
-        let pubkey = Pubkey::from_str(address)
-            .context("Invalid Solana address")?;
+        let pubkey = Pubkey::from_str(address).context("Invalid Solana address")?;
         let address_str = address.to_string();
 
         // Get recent transaction signatures
@@ -225,7 +257,8 @@ impl SolanaClient {
             ..Default::default()
         };
 
-        let signatures = self.client
+        let signatures = self
+            .client
             .get_signatures_for_address_with_config(&pubkey, config)
             .context("Failed to fetch transaction signatures")?;
 
@@ -262,13 +295,17 @@ impl SolanaClient {
                             // Calculate balance change from pre/post balances
                             if let Some(meta) = &tx.transaction.meta {
                                 // Get account keys from the transaction JSON
-                                let account_keys = Self::extract_account_keys(&tx.transaction.transaction)
-                                    .unwrap_or_default();
+                                let account_keys =
+                                    Self::extract_account_keys(&tx.transaction.transaction)
+                                        .unwrap_or_default();
 
                                 for (i, key) in account_keys.iter().enumerate() {
                                     if key == &address_str {
-                                        if i < meta.pre_balances.len() && i < meta.post_balances.len() {
-                                            let lamport_change = meta.post_balances[i] as i64 - meta.pre_balances[i] as i64;
+                                        if i < meta.pre_balances.len()
+                                            && i < meta.post_balances.len()
+                                        {
+                                            let lamport_change = meta.post_balances[i] as i64
+                                                - meta.pre_balances[i] as i64;
                                             sol_change = lamport_change as f64 / 1_000_000_000.0;
                                         }
                                         break;
@@ -296,16 +333,22 @@ impl SolanaClient {
         Ok(transactions)
     }
 
-    fn extract_account_keys(tx: &solana_transaction_status_client_types::EncodedTransaction) -> Option<Vec<String>> {
+    fn extract_account_keys(
+        tx: &solana_transaction_status_client_types::EncodedTransaction,
+    ) -> Option<Vec<String>> {
         use solana_transaction_status_client_types::EncodedTransaction;
 
         match tx {
             EncodedTransaction::Json(ui_tx) => {
                 // For JSON format, extract keys from the message
                 match &ui_tx.message {
-                    solana_transaction_status_client_types::UiMessage::Parsed(parsed) => {
-                        Some(parsed.account_keys.iter().map(|k| k.pubkey.clone()).collect())
-                    }
+                    solana_transaction_status_client_types::UiMessage::Parsed(parsed) => Some(
+                        parsed
+                            .account_keys
+                            .iter()
+                            .map(|k| k.pubkey.clone())
+                            .collect(),
+                    ),
                     solana_transaction_status_client_types::UiMessage::Raw(raw) => {
                         Some(raw.account_keys.clone())
                     }
@@ -315,16 +358,22 @@ impl SolanaClient {
                 // For binary formats, we'd need to decode - skip for now
                 None
             }
-            EncodedTransaction::Accounts(accounts_tx) => {
-                Some(accounts_tx.account_keys.iter().map(|k| k.pubkey.clone()).collect())
-            }
+            EncodedTransaction::Accounts(accounts_tx) => Some(
+                accounts_tx
+                    .account_keys
+                    .iter()
+                    .map(|k| k.pubkey.clone())
+                    .collect(),
+            ),
         }
     }
 }
 
 // Implement PriceEnrichable trait for Solana balances
-impl crate::PriceEnrichable for AccountBalances {
-    const NATIVE_SYMBOL: &'static str = "SOL";
+impl crate::types::PriceEnrichable for AccountBalances {
+    fn native_symbol(&self) -> &str {
+        "SOL"
+    }
 
     fn native_balance(&self) -> f64 {
         self.sol_balance

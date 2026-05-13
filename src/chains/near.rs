@@ -132,8 +132,10 @@ impl NearClient {
 }
 
 // Implement PriceEnrichable trait for NEAR balances
-impl crate::PriceEnrichable for AccountBalances {
-    const NATIVE_SYMBOL: &'static str = "NEAR";
+impl crate::types::PriceEnrichable for AccountBalances {
+    fn native_symbol(&self) -> &str {
+        "NEAR"
+    }
 
     fn native_balance(&self) -> f64 {
         self.near_balance

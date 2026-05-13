@@ -5,9 +5,11 @@ use std::env;
 const MERCURY_API_BASE: &str = "https://api.mercury.com/api/v1";
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountBalances {
     pub available_balance: f64,
     pub current_balance: f64,
+    #[serde(alias = "id")]
     pub account_id: String,
     pub status: String,
     pub created_at: Option<String>,
@@ -56,16 +58,6 @@ struct AccountsResponse {
     accounts: Vec<MercuryAccount>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MercuryAccountResponse {
-    available_balance: f64,
-    current_balance: f64,
-    id: String,
-    status: String,
-    created_at: Option<String>,
-}
-
 pub struct MercuryClient {
     api_key: String,
     client: reqwest::Client,
@@ -73,8 +65,8 @@ pub struct MercuryClient {
 
 impl MercuryClient {
     pub fn new() -> Result<Self> {
-        let api_key = env::var("MERCURY_API_KEY")
-            .context("MERCURY_API_KEY environment variable not set")?;
+        let api_key =
+            env::var("MERCURY_API_KEY").context("MERCURY_API_KEY environment variable not set")?;
 
         Ok(Self {
             api_key,
@@ -86,7 +78,7 @@ impl MercuryClient {
         let response = self
             .client
             .get(url)
-            .header("Authorization", format!("Bearer secret-token:{}", self.api_key))
+            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Accept", "application/json")
             .send()
             .await
@@ -94,11 +86,21 @@ impl MercuryClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Mercury API request failed with status {}: {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Mercury API request failed with status {}: {}",
+                status,
+                error_text
+            );
         }
 
-        response.json().await.context("Failed to parse Mercury API response")
+        response
+            .json()
+            .await
+            .context("Failed to parse Mercury API response")
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<MercuryAccount>> {
@@ -109,15 +111,7 @@ impl MercuryClient {
 
     pub async fn get_account_balance(&self, account_id: &str) -> Result<AccountBalances> {
         let url = format!("{}/account/{}", MERCURY_API_BASE, account_id);
-        let account: MercuryAccountResponse = self.get(&url).await?;
-
-        Ok(AccountBalances {
-            available_balance: account.available_balance,
-            current_balance: account.current_balance,
-            account_id: account.id,
-            status: account.status,
-            created_at: account.created_at,
-        })
+        self.get(&url).await
     }
 
     pub async fn get_transactions(

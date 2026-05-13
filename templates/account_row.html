@@ -1,15 +1,46 @@
-<tr id="account-{{ name|replace(" ", "-") }}">
-    <td>{{ name }}</td>
-    <td>{{ company }}</td>
-    <td class="truncate amount">{{ address }}</td>
-    <td><span class="chain-badge">{{ chain }}</span></td>
+<tr id="row-{{ name|replace(" ", "-") }}">
     <td>
-        <button class="btn btn-sm btn-danger"
-                hx-delete="/accounts/{{ name }}"
-                hx-target="#account-{{ name|replace(" ", "-") }}"
-                hx-swap="outerHTML"
-                hx-confirm="Remove {{ name }}?">
-            Remove
-        </button>
+        <div class="asset-info">
+            <div class="asset-icon">
+                <i data-lucide="wallet" style="width: 16px; height: 16px;"></i>
+            </div>
+            <div>
+                <div class="asset-name">{{ name }}</div>
+                <div class="asset-symbol truncate">{{ address }}</div>
+            </div>
+        </div>
     </td>
+    <td>{{ company }}</td>
+    <td><span class="chain-badge">{{ chain }}</span></td>
+    <td class="amount">--</td>
+    <td class="amount">--</td>
+    <td class="amount">--</td>
+    <td>
+        <div class="row-actions">
+            <button class="btn btn-secondary btn-sm"
+                    hx-get="/balances/{{ name }}"
+                    hx-target="#detail-{{ name|replace(" ", "-") }}"
+                    hx-swap="innerHTML"
+                    hx-indicator="#spinner-{{ name|replace(" ", "-") }}">
+                <span class="spinner htmx-indicator" id="spinner-{{ name|replace(" ", "-") }}"></span>
+                Query
+            </button>
+            <button class="btn btn-secondary btn-sm"
+                    hx-get="/transactions/{{ name }}"
+                    hx-target="#detail-{{ name|replace(" ", "-") }}"
+                    hx-swap="innerHTML">
+                Txns
+            </button>
+            <button class="btn btn-secondary btn-sm btn-danger"
+                    hx-delete="/accounts/{{ name }}"
+                    hx-target="#row-{{ name|replace(" ", "-") }}"
+                    hx-swap="outerHTML"
+                    hx-confirm="Remove {{ name }}?">
+                <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i>
+            </button>
+        </div>
+    </td>
+</tr>
+<tr class="detail-row">
+    <td colspan="7" id="detail-{{ name|replace(" ", "-") }}"></td>
 </tr>

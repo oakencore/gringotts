@@ -40,8 +40,8 @@ pub struct CircleClient {
 
 impl CircleClient {
     pub fn new() -> Result<Self> {
-        let api_key = env::var("CIRCLE_API_KEY")
-            .context("CIRCLE_API_KEY environment variable not set")?;
+        let api_key =
+            env::var("CIRCLE_API_KEY").context("CIRCLE_API_KEY environment variable not set")?;
 
         Ok(Self {
             api_key,
@@ -63,8 +63,15 @@ impl CircleClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Circle API request failed with status {}: {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Circle API request failed with status {}: {}",
+                status,
+                error_text
+            );
         }
 
         let balance_response: CircleBalanceResponse = response
@@ -76,8 +83,10 @@ impl CircleClient {
         let mut available_balances = Vec::new();
         for amount in balance_response.data.available {
             let balance = Balance {
-                amount: amount.amount.parse::<f64>()
-                    .context(format!("Failed to parse available amount: {}", amount.amount))?,
+                amount: amount.amount.parse::<f64>().context(format!(
+                    "Failed to parse available amount: {}",
+                    amount.amount
+                ))?,
                 currency: amount.currency,
             };
             available_balances.push(balance);
@@ -86,8 +95,10 @@ impl CircleClient {
         let mut unsettled_balances = Vec::new();
         for amount in balance_response.data.unsettled {
             let balance = Balance {
-                amount: amount.amount.parse::<f64>()
-                    .context(format!("Failed to parse unsettled amount: {}", amount.amount))?,
+                amount: amount.amount.parse::<f64>().context(format!(
+                    "Failed to parse unsettled amount: {}",
+                    amount.amount
+                ))?,
                 currency: amount.currency,
             };
             unsettled_balances.push(balance);

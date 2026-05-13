@@ -1,13 +1,7 @@
-use crate::aptos;
-use crate::circle;
-use crate::evm;
-use crate::mercury;
-use crate::near;
-use crate::solana;
-use crate::starknet;
+use crate::banking::{circle, mercury};
+use crate::chains::{aptos, evm, near, solana, starknet, sui};
 use crate::storage::{BankingAccount, BankingService, Chain, WalletAddress};
-use crate::sui;
-use crate::FetchFailure;
+use crate::types::FetchFailure;
 
 fn format_usd(value: f64) -> String {
     let formatted = format!("{:.2}", value);
@@ -15,16 +9,28 @@ fn format_usd(value: f64) -> String {
     let integer_part = parts[0];
     let decimal_part = parts.get(1).unwrap_or(&"00");
 
-    // Add commas to integer part
+    // Handle negative sign separately
+    let (sign, digits) = if let Some(d) = integer_part.strip_prefix('-') {
+        ("-", d)
+    } else {
+        ("", integer_part)
+    };
+
+    // Add commas to digit part
     let mut result = String::new();
-    for (i, ch) in integer_part.chars().rev().enumerate() {
+    for (i, ch) in digits.chars().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');
         }
         result.push(ch);
     }
 
-    format!("{}.{}", result.chars().rev().collect::<String>(), decimal_part)
+    format!(
+        "{}{}.{}",
+        sign,
+        result.chars().rev().collect::<String>(),
+        decimal_part
+    )
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
@@ -35,9 +41,12 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     } else {
         let prefix_len = (max_len - 3) / 2;
         let suffix_len = max_len - 3 - prefix_len;
-        format!("{}...{}",
+        format!(
+            "{}...{}",
             s.chars().take(prefix_len).collect::<String>(),
-            s.chars().skip(s.chars().count() - suffix_len).collect::<String>()
+            s.chars()
+                .skip(s.chars().count() - suffix_len)
+                .collect::<String>()
         )
     }
 }
@@ -69,20 +78,21 @@ pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[Banking
     let min_chain = 10;
     let min_total = min_company + min_name + min_address + min_type + min_chain;
 
-    let (company_width, name_width, address_width, type_width, chain_width) = if available_width < min_total {
-        // If terminal is too small, use minimum widths
-        (min_company, min_name, min_address, min_type, min_chain)
-    } else {
-        // Distribute extra space proportionally
-        let extra = available_width - min_total;
-        // Give more space to Name and Address columns
-        let company_w = min_company + extra / 10;
-        let name_w = min_name + (extra * 3) / 10;
-        let address_w = min_address + (extra * 4) / 10;
-        let type_w = min_type + extra / 10;
-        let chain_w = min_chain + extra / 10;
-        (company_w, name_w, address_w, type_w, chain_w)
-    };
+    let (company_width, name_width, address_width, type_width, chain_width) =
+        if available_width < min_total {
+            // If terminal is too small, use minimum widths
+            (min_company, min_name, min_address, min_type, min_chain)
+        } else {
+            // Distribute extra space proportionally
+            let extra = available_width - min_total;
+            // Give more space to Name and Address columns
+            let company_w = min_company + extra / 10;
+            let name_w = min_name + (extra * 3) / 10;
+            let address_w = min_address + (extra * 4) / 10;
+            let type_w = min_type + extra / 10;
+            let chain_w = min_chain + extra / 10;
+            (company_w, name_w, address_w, type_w, chain_w)
+        };
 
     let table_width = company_width + name_width + address_width + type_width + chain_width + 10;
 
@@ -90,13 +100,15 @@ pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[Banking
     println!("\n╭{}╗", "─".repeat(table_width - 2));
     let title = "TRACKED ADDRESSES & ACCOUNTS";
     let title_padding = (table_width - 2 - title.len()) / 2;
-    println!("│{}{:^width$}{}│",
+    println!(
+        "│{}{:^width$}{}│",
         " ".repeat(title_padding),
         title,
         " ".repeat(table_width - 2 - title_padding - title.len()),
         width = title.len()
     );
-    println!("├{}┬{}┬{}┬{}┬{}┤",
+    println!(
+        "├{}┬{}┬{}┬{}┬{}┤",
         "─".repeat(company_width),
         "─".repeat(name_width),
         "─".repeat(address_width),
@@ -105,11 +117,21 @@ pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[Banking
     );
 
     // Print column headers
-    println!("│{:^cw$}│{:^nw$}│{:^aw$}│{:^tw$}│{:^chw$}│",
-        "Company", "Name", "Address/ID", "Type", "Chain/Service",
-        cw = company_width, nw = name_width, aw = address_width, tw = type_width, chw = chain_width
+    println!(
+        "│{:^cw$}│{:^nw$}│{:^aw$}│{:^tw$}│{:^chw$}│",
+        "Company",
+        "Name",
+        "Address/ID",
+        "Type",
+        "Chain/Service",
+        cw = company_width,
+        nw = name_width,
+        aw = address_width,
+        tw = type_width,
+        chw = chain_width
     );
-    println!("├{}┼{}┼{}┼{}┼{}┤",
+    println!(
+        "├{}┼{}┼{}┼{}┼{}┤",
         "─".repeat(company_width),
         "─".repeat(name_width),
         "─".repeat(address_width),
@@ -129,9 +151,18 @@ pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[Banking
         let display_type = "Crypto".to_string();
         let display_chain = truncate_string(addr.chain.display_name(), chain_width);
 
-        println!("│{:<cw$}│{:<nw$}│{:<aw$}│{:<tw$}│{:<chw$}│",
-            display_company, display_name, display_addr, display_type, display_chain,
-            cw = company_width, nw = name_width, aw = address_width, tw = type_width, chw = chain_width
+        println!(
+            "│{:<cw$}│{:<nw$}│{:<aw$}│{:<tw$}│{:<chw$}│",
+            display_company,
+            display_name,
+            display_addr,
+            display_type,
+            display_chain,
+            cw = company_width,
+            nw = name_width,
+            aw = address_width,
+            tw = type_width,
+            chw = chain_width
         );
     }
 
@@ -147,27 +178,47 @@ pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[Banking
         let display_type = "Banking".to_string();
         let display_service = truncate_string(account.service.display_name(), chain_width);
 
-        println!("│{:<cw$}│{:<nw$}│{:<aw$}│{:<tw$}│{:<chw$}│",
-            display_company, display_name, display_id, display_type, display_service,
-            cw = company_width, nw = name_width, aw = address_width, tw = type_width, chw = chain_width
+        println!(
+            "│{:<cw$}│{:<nw$}│{:<aw$}│{:<tw$}│{:<chw$}│",
+            display_company,
+            display_name,
+            display_id,
+            display_type,
+            display_service,
+            cw = company_width,
+            nw = name_width,
+            aw = address_width,
+            tw = type_width,
+            chw = chain_width
         );
     }
 
     // Print footer
-    println!("├{}┴{}┴{}┴{}┴{}┤",
+    println!(
+        "├{}┴{}┴{}┴{}┴{}┤",
         "─".repeat(company_width),
         "─".repeat(name_width),
         "─".repeat(address_width),
         "─".repeat(type_width),
         "─".repeat(chain_width)
     );
-    let footer = format!("Total: {} crypto address(es), {} banking account(s)", addresses.len(), banking_accounts.len());
+    let footer = format!(
+        "Total: {} crypto address(es), {} banking account(s)",
+        addresses.len(),
+        banking_accounts.len()
+    );
     let footer_padding = table_width - 2 - footer.len();
     println!("│{}{}│", footer, " ".repeat(footer_padding));
     println!("╰{}╯\n", "─".repeat(table_width - 2));
 }
 
-pub fn render_solana_balances(company: &str, name: &str, address: &str, balances: &solana::AccountBalances, chain: &Chain) {
+pub fn render_solana_balances(
+    company: &str,
+    name: &str,
+    address: &str,
+    balances: &solana::AccountBalances,
+    chain: &Chain,
+) {
     const MIN_WIDTH: usize = 79;
 
     // Collect all content lines to calculate max width
@@ -183,9 +234,18 @@ pub fn render_solana_balances(company: &str, name: &str, address: &str, balances
     // SOL Balance line
     let sol_line = if let Some(usd_value) = balances.sol_usd_value {
         if let Some(price) = balances.sol_usd_price {
-            format!("SOL Balance: {:.9} SOL (${} @ ${})", balances.sol_balance, format_usd(usd_value), format_usd(price))
+            format!(
+                "SOL Balance: {:.9} SOL (${} @ ${})",
+                balances.sol_balance,
+                format_usd(usd_value),
+                format_usd(price)
+            )
         } else {
-            format!("SOL Balance: {:.9} SOL (${})", balances.sol_balance, format_usd(usd_value))
+            format!(
+                "SOL Balance: {:.9} SOL (${})",
+                balances.sol_balance,
+                format_usd(usd_value)
+            )
         }
     } else {
         format!("SOL Balance: {:.9} SOL", balances.sol_balance)
@@ -205,7 +265,11 @@ pub fn render_solana_balances(company: &str, name: &str, address: &str, balances
             lines.push(token_display);
 
             let mint_display = if token.mint.len() > 44 {
-                format!("    Mint: {}...{}", &token.mint[..20], &token.mint[token.mint.len()-20..])
+                format!(
+                    "    Mint: {}...{}",
+                    &token.mint[..20],
+                    &token.mint[token.mint.len() - 20..]
+                )
             } else {
                 format!("    Mint: {}", token.mint)
             };
@@ -213,9 +277,18 @@ pub fn render_solana_balances(company: &str, name: &str, address: &str, balances
 
             let balance_str = if let Some(usd_value) = token.usd_value {
                 if let Some(price) = token.usd_price {
-                    format!("    Balance: {:.6} (${} @ ${:.6})", token.ui_amount, format_usd(usd_value), price)
+                    format!(
+                        "    Balance: {:.6} (${} @ ${:.6})",
+                        token.ui_amount,
+                        format_usd(usd_value),
+                        price
+                    )
                 } else {
-                    format!("    Balance: {:.6} (${})", token.ui_amount, format_usd(usd_value))
+                    format!(
+                        "    Balance: {:.6} (${})",
+                        token.ui_amount,
+                        format_usd(usd_value)
+                    )
                 }
             } else {
                 format!("    Balance: {:.6}", token.ui_amount)
@@ -257,7 +330,7 @@ pub fn render_solana_balances(company: &str, name: &str, address: &str, balances
 
         let mut line_idx = 6;
         for _ in &balances.token_balances {
-            println!("║  {:<width$} ║", lines[line_idx], width = box_width);     // Token name
+            println!("║  {:<width$} ║", lines[line_idx], width = box_width); // Token name
             println!("║  {:<width$} ║", lines[line_idx + 1], width = box_width); // Mint
             println!("║  {:<width$} ║", lines[line_idx + 2], width = box_width); // Balance
             println!("║  {:<width$} ║", lines[line_idx + 3], width = box_width); // Decimals
@@ -278,18 +351,33 @@ pub fn render_solana_balances(company: &str, name: &str, address: &str, balances
 }
 
 pub fn render_error(error: &str) {
-    println!("\n╭─────────────────────────────────────────────────────────────────────────────────╮");
-    println!("│ ERROR                                                                            │");
+    println!(
+        "\n╭─────────────────────────────────────────────────────────────────────────────────╮"
+    );
+    println!(
+        "│ ERROR                                                                            │"
+    );
     println!("├─────────────────────────────────────────────────────────────────────────────────┤");
-    println!("│ {}                                                                              │", error);
-    println!("╰─────────────────────────────────────────────────────────────────────────────────╯\n");
+    println!(
+        "│ {}                                                                              │",
+        error
+    );
+    println!(
+        "╰─────────────────────────────────────────────────────────────────────────────────╯\n"
+    );
 }
 
 pub fn render_success(message: &str) {
     println!("\n{}\n", message);
 }
 
-pub fn render_evm_balances(company: &str, name: &str, address: &str, balances: &evm::AccountBalances, chain: &Chain) {
+pub fn render_evm_balances(
+    company: &str,
+    name: &str,
+    address: &str,
+    balances: &evm::AccountBalances,
+    chain: &Chain,
+) {
     const MIN_WIDTH: usize = 79;
 
     // Collect all content lines to calculate max width
@@ -306,12 +394,28 @@ pub fn render_evm_balances(company: &str, name: &str, address: &str, balances: &
     let native_symbol = chain.native_token_symbol();
     let native_line = if let Some(usd_value) = balances.eth_usd_value {
         if let Some(price) = balances.eth_usd_price {
-            format!("{} Balance: {:.9} {} (${} @ ${})", native_symbol, balances.eth_balance, native_symbol, format_usd(usd_value), format_usd(price))
+            format!(
+                "{} Balance: {:.9} {} (${} @ ${})",
+                native_symbol,
+                balances.eth_balance,
+                native_symbol,
+                format_usd(usd_value),
+                format_usd(price)
+            )
         } else {
-            format!("{} Balance: {:.9} {} (${})", native_symbol, balances.eth_balance, native_symbol, format_usd(usd_value))
+            format!(
+                "{} Balance: {:.9} {} (${})",
+                native_symbol,
+                balances.eth_balance,
+                native_symbol,
+                format_usd(usd_value)
+            )
         }
     } else {
-        format!("{} Balance: {:.9} {}", native_symbol, balances.eth_balance, native_symbol)
+        format!(
+            "{} Balance: {:.9} {}",
+            native_symbol, balances.eth_balance, native_symbol
+        )
     };
     lines.push(native_line);
 
@@ -331,9 +435,18 @@ pub fn render_evm_balances(company: &str, name: &str, address: &str, balances: &
 
             let balance_str = if let Some(usd_value) = token.usd_value {
                 if let Some(price) = token.usd_price {
-                    format!("    Balance: {:.6} (${} @ ${:.6})", token.ui_amount, format_usd(usd_value), price)
+                    format!(
+                        "    Balance: {:.6} (${} @ ${:.6})",
+                        token.ui_amount,
+                        format_usd(usd_value),
+                        price
+                    )
                 } else {
-                    format!("    Balance: {:.6} (${})", token.ui_amount, format_usd(usd_value))
+                    format!(
+                        "    Balance: {:.6} (${})",
+                        token.ui_amount,
+                        format_usd(usd_value)
+                    )
                 }
             } else {
                 format!("    Balance: {:.6}", token.ui_amount)
@@ -375,7 +488,7 @@ pub fn render_evm_balances(company: &str, name: &str, address: &str, balances: &
 
         let mut line_idx = 6;
         for _ in &balances.token_balances {
-            println!("║  {:<width$} ║", lines[line_idx], width = box_width);     // Token name
+            println!("║  {:<width$} ║", lines[line_idx], width = box_width); // Token name
             println!("║  {:<width$} ║", lines[line_idx + 1], width = box_width); // Contract
             println!("║  {:<width$} ║", lines[line_idx + 2], width = box_width); // Balance
             println!("║  {:<width$} ║", lines[line_idx + 3], width = box_width); // Decimals
@@ -395,18 +508,31 @@ pub fn render_evm_balances(company: &str, name: &str, address: &str, balances: &
     println!("╚{}╝\n", "═".repeat(box_width + 2));
 }
 
-pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary, price_info: Option<&str>) {
+pub fn render_portfolio_summary(
+    portfolio: &crate::types::PortfolioSummary,
+    price_info: Option<&str>,
+) {
     const BOX_WIDTH: usize = 81;
 
-    println!("\n╔═════════════════════════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n╔═════════════════════════════════════════════════════════════════════════════════╗"
+    );
     println!("║                               PORTFOLIO SUMMARY                                 ║");
     println!("╠═════════════════════════════════════════════════════════════════════════════════╣");
 
     // Total Portfolio Value with proper padding
-    let total_value_str = format!("Total Portfolio Value: ${}", format_usd(portfolio.total_usd_value));
+    let total_value_str = format!(
+        "Total Portfolio Value: ${}",
+        format_usd(portfolio.total_usd_value)
+    );
     let total_value_len = total_value_str.len();
     let total_padding = (BOX_WIDTH - 2).saturating_sub(total_value_len);
-    println!("║  {}{:width$} ║", total_value_str, "", width = total_padding);
+    println!(
+        "║  {}{:width$} ║",
+        total_value_str,
+        "",
+        width = total_padding
+    );
 
     // Show price cache info if present
     if let Some(info) = price_info {
@@ -416,9 +542,15 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary, price_info:
     }
 
     if portfolio.companies.is_empty() {
-        println!("╠═════════════════════════════════════════════════════════════════════════════════╣");
-        println!("║  No companies found                                                             ║");
-        println!("╚═════════════════════════════════════════════════════════════════════════════════╝\n");
+        println!(
+            "╠═════════════════════════════════════════════════════════════════════════════════╣"
+        );
+        println!(
+            "║  No companies found                                                             ║"
+        );
+        println!(
+            "╚═════════════════════════════════════════════════════════════════════════════════╝\n"
+        );
         return;
     }
 
@@ -427,21 +559,39 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary, price_info:
     sorted_companies.sort_by(|a, b| b.1.total_usd_value.total_cmp(&a.1.total_usd_value));
 
     for (company_name, company) in sorted_companies {
-        println!("╠═════════════════════════════════════════════════════════════════════════════════╣");
+        println!(
+            "╠═════════════════════════════════════════════════════════════════════════════════╣"
+        );
 
         // Company header
         let company_header = format!("COMPANY: {}", company_name);
         let company_header_len = company_header.len();
         let company_padding = (BOX_WIDTH - 2).saturating_sub(company_header_len);
-        println!("║  {}{:width$} ║", company_header, "", width = company_padding);
+        println!(
+            "║  {}{:width$} ║",
+            company_header,
+            "",
+            width = company_padding
+        );
 
         // Company total value
         let company_value_str = format!("Total Value: ${}", format_usd(company.total_usd_value));
         let company_value_len = company_value_str.len();
-        let company_value_padding = if company_value_len + 2 < BOX_WIDTH - 2 { BOX_WIDTH - 2 - company_value_len - 2 } else { 0 };
-        println!("║    {}{:width$} ║", company_value_str, "", width = company_value_padding);
+        let company_value_padding = if company_value_len + 2 < BOX_WIDTH - 2 {
+            BOX_WIDTH - 2 - company_value_len - 2
+        } else {
+            0
+        };
+        println!(
+            "║    {}{:width$} ║",
+            company_value_str,
+            "",
+            width = company_value_padding
+        );
 
-        println!("╟─────────────────────────────────────────────────────────────────────────────────╢");
+        println!(
+            "╟─────────────────────────────────────────────────────────────────────────────────╢"
+        );
 
         if company.assets.is_empty() {
             println!("║      No assets found                                                            ║");
@@ -458,27 +608,56 @@ pub fn render_portfolio_summary(portfolio: &crate::PortfolioSummary, price_info:
                 // Symbol line
                 let symbol_str = format!("{}:", asset.symbol);
                 let symbol_len = symbol_str.len();
-                let symbol_padding = if symbol_len + 4 < BOX_WIDTH - 2 { BOX_WIDTH - 2 - symbol_len - 4 } else { 0 };
-                println!("║      {}{:width$} ║", symbol_str, "", width = symbol_padding);
+                let symbol_padding = if symbol_len + 4 < BOX_WIDTH - 2 {
+                    BOX_WIDTH - 2 - symbol_len - 4
+                } else {
+                    0
+                };
+                println!(
+                    "║      {}{:width$} ║",
+                    symbol_str,
+                    "",
+                    width = symbol_padding
+                );
 
                 // Amount and USD Value on same line if USD value exists
                 let usd_value = asset.usd_value.unwrap_or(0.0);
                 if usd_value > 0.0 {
                     let detail_str = format!("{:.6} (${:})", asset.amount, format_usd(usd_value));
                     let detail_len = detail_str.len();
-                    let detail_padding = if detail_len + 8 < BOX_WIDTH - 2 { BOX_WIDTH - 2 - detail_len - 8 } else { 0 };
-                    println!("║          {}{:width$} ║", detail_str, "", width = detail_padding);
+                    let detail_padding = if detail_len + 8 < BOX_WIDTH - 2 {
+                        BOX_WIDTH - 2 - detail_len - 8
+                    } else {
+                        0
+                    };
+                    println!(
+                        "║          {}{:width$} ║",
+                        detail_str,
+                        "",
+                        width = detail_padding
+                    );
                 } else {
                     let amount_str = format!("{:.6}", asset.amount);
                     let amount_len = amount_str.len();
-                    let amount_padding = if amount_len + 8 < BOX_WIDTH - 2 { BOX_WIDTH - 2 - amount_len - 8 } else { 0 };
-                    println!("║          {}{:width$} ║", amount_str, "", width = amount_padding);
+                    let amount_padding = if amount_len + 8 < BOX_WIDTH - 2 {
+                        BOX_WIDTH - 2 - amount_len - 8
+                    } else {
+                        0
+                    };
+                    println!(
+                        "║          {}{:width$} ║",
+                        amount_str,
+                        "",
+                        width = amount_padding
+                    );
                 }
             }
         }
     }
 
-    println!("╚═════════════════════════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "╚═════════════════════════════════════════════════════════════════════════════════╝\n"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -504,9 +683,22 @@ fn render_simple_balance(
 
     let balance_line = if let Some(usd_val) = usd_value {
         if let Some(price) = usd_price {
-            format!("{} Balance: {:.9} {} (${} @ ${})", symbol, balance, symbol, format_usd(usd_val), format_usd(price))
+            format!(
+                "{} Balance: {:.9} {} (${} @ ${})",
+                symbol,
+                balance,
+                symbol,
+                format_usd(usd_val),
+                format_usd(price)
+            )
         } else {
-            format!("{} Balance: {:.9} {} (${})", symbol, balance, symbol, format_usd(usd_val))
+            format!(
+                "{} Balance: {:.9} {} (${})",
+                symbol,
+                balance,
+                symbol,
+                format_usd(usd_val)
+            )
         }
     } else {
         format!("{} Balance: {:.9} {}", symbol, balance, symbol)
@@ -536,35 +728,93 @@ fn render_simple_balance(
     println!("╚{}╝\n", "═".repeat(box_width + 2));
 }
 
-pub fn render_near_balances(company: &str, name: &str, address: &str, balances: &near::AccountBalances, chain: &Chain) {
+pub fn render_near_balances(
+    company: &str,
+    name: &str,
+    address: &str,
+    balances: &near::AccountBalances,
+    chain: &Chain,
+) {
     render_simple_balance(
-        company, name, address, chain, "NEAR",
-        balances.near_balance, balances.near_usd_price, balances.near_usd_value, balances.total_usd_value,
+        company,
+        name,
+        address,
+        chain,
+        "NEAR",
+        balances.near_balance,
+        balances.near_usd_price,
+        balances.near_usd_value,
+        balances.total_usd_value,
     );
 }
 
-pub fn render_aptos_balances(company: &str, name: &str, address: &str, balances: &aptos::AccountBalances, chain: &Chain) {
+pub fn render_aptos_balances(
+    company: &str,
+    name: &str,
+    address: &str,
+    balances: &aptos::AccountBalances,
+    chain: &Chain,
+) {
     render_simple_balance(
-        company, name, address, chain, "APT",
-        balances.apt_balance, balances.apt_usd_price, balances.apt_usd_value, balances.total_usd_value,
+        company,
+        name,
+        address,
+        chain,
+        "APT",
+        balances.apt_balance,
+        balances.apt_usd_price,
+        balances.apt_usd_value,
+        balances.total_usd_value,
     );
 }
 
-pub fn render_sui_balances(company: &str, name: &str, address: &str, balances: &sui::AccountBalances, chain: &Chain) {
+pub fn render_sui_balances(
+    company: &str,
+    name: &str,
+    address: &str,
+    balances: &sui::AccountBalances,
+    chain: &Chain,
+) {
     render_simple_balance(
-        company, name, address, chain, "SUI",
-        balances.sui_balance, balances.sui_usd_price, balances.sui_usd_value, balances.total_usd_value,
+        company,
+        name,
+        address,
+        chain,
+        "SUI",
+        balances.sui_balance,
+        balances.sui_usd_price,
+        balances.sui_usd_value,
+        balances.total_usd_value,
     );
 }
 
-pub fn render_starknet_balances(company: &str, name: &str, address: &str, balances: &starknet::AccountBalances, chain: &Chain) {
+pub fn render_starknet_balances(
+    company: &str,
+    name: &str,
+    address: &str,
+    balances: &starknet::AccountBalances,
+    chain: &Chain,
+) {
     render_simple_balance(
-        company, name, address, chain, "ETH",
-        balances.eth_balance, balances.eth_usd_price, balances.eth_usd_value, balances.total_usd_value,
+        company,
+        name,
+        address,
+        chain,
+        "ETH",
+        balances.eth_balance,
+        balances.eth_usd_price,
+        balances.eth_usd_value,
+        balances.total_usd_value,
     );
 }
 
-pub fn render_mercury_balances(company: &str, name: &str, account_id: &str, balances: &mercury::AccountBalances, service: &BankingService) {
+pub fn render_mercury_balances(
+    company: &str,
+    name: &str,
+    account_id: &str,
+    balances: &mercury::AccountBalances,
+    service: &BankingService,
+) {
     const MIN_WIDTH: usize = 79;
     let mut lines = Vec::new();
 
@@ -575,8 +825,14 @@ pub fn render_mercury_balances(company: &str, name: &str, account_id: &str, bala
     lines.push(format!("Service: {}", service.display_name()));
     lines.push(format!("Status: {}", balances.status));
 
-    lines.push(format!("Available Balance: ${}", format_usd(balances.available_balance)));
-    lines.push(format!("Current Balance: ${}", format_usd(balances.current_balance)));
+    lines.push(format!(
+        "Available Balance: ${}",
+        format_usd(balances.available_balance)
+    ));
+    lines.push(format!(
+        "Current Balance: ${}",
+        format_usd(balances.current_balance)
+    ));
 
     if let Some(created_at) = &balances.created_at {
         lines.push(format!("Created: {}", created_at));
@@ -603,7 +859,12 @@ pub fn render_mercury_balances(company: &str, name: &str, account_id: &str, bala
     println!("╚{}╝\n", "═".repeat(box_width + 2));
 }
 
-pub fn render_circle_balances(company: &str, name: &str, balances: &circle::AccountBalances, service: &BankingService) {
+pub fn render_circle_balances(
+    company: &str,
+    name: &str,
+    balances: &circle::AccountBalances,
+    service: &BankingService,
+) {
     const MIN_WIDTH: usize = 79;
     let mut lines = Vec::new();
 
@@ -623,7 +884,11 @@ pub fn render_circle_balances(company: &str, name: &str, balances: &circle::Acco
             } else {
                 &balance.currency
             };
-            lines.push(format!("  {}: ${}", currency_display, format_usd(balance.amount)));
+            lines.push(format!(
+                "  {}: ${}",
+                currency_display,
+                format_usd(balance.amount)
+            ));
         }
     }
 
@@ -641,7 +906,11 @@ pub fn render_circle_balances(company: &str, name: &str, balances: &circle::Acco
                     } else {
                         &balance.currency
                     };
-                    lines.push(format!("  {}: ${}", currency_display, format_usd(balance.amount)));
+                    lines.push(format!(
+                        "  {}: ${}",
+                        currency_display,
+                        format_usd(balance.amount)
+                    ));
                 }
             }
         }

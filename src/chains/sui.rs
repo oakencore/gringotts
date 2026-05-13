@@ -99,10 +99,7 @@ impl SuiClient {
 
         // Query SUI balance using suix_getBalance
         let result = self
-            .rpc_call(
-                "suix_getBalance",
-                json!([address, "0x2::sui::SUI"]),
-            )
+            .rpc_call("suix_getBalance", json!([address, "0x2::sui::SUI"]))
             .await?;
 
         // Parse balance from MIST (10^9 MIST = 1 SUI)
@@ -111,9 +108,7 @@ impl SuiClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid balance format"))?;
 
-        let balance_mist: u64 = balance_str
-            .parse()
-            .context("Failed to parse SUI balance")?;
+        let balance_mist: u128 = balance_str.parse().context("Failed to parse SUI balance")?;
 
         // Convert MIST to SUI (1 SUI = 10^9 MIST)
         let sui_balance = balance_mist as f64 / 1_000_000_000.0;
@@ -133,8 +128,10 @@ impl SuiClient {
 }
 
 // Implement PriceEnrichable trait for Sui balances
-impl crate::PriceEnrichable for AccountBalances {
-    const NATIVE_SYMBOL: &'static str = "SUI";
+impl crate::types::PriceEnrichable for AccountBalances {
+    fn native_symbol(&self) -> &str {
+        "SUI"
+    }
 
     fn native_balance(&self) -> f64 {
         self.sui_balance

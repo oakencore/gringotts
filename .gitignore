@@ -32,5 +32,13 @@ node_modules/
 # Price feed config (user-specific)
 feedIds.json
 
+# Tool directories
+.playwright-mcp/
+.ralph-tui/
+tasks/
+
+# Design artifacts (local-only)
+*.pen
+
 # Project-specific AI instructions
 CLAUDE.md

@@ -1,24 +1,41 @@
 <div class="transactions-card">
     <div class="transactions-header">
-        <div>
+        <div class="transactions-info">
             <h3>{{ name }}</h3>
             <span class="account-type-badge">{{ account_type }}</span>
         </div>
-        <button class="btn btn-sm" onclick="this.closest('.transactions-card').remove()">Close</button>
+        <button class="btn btn-secondary btn-sm" onclick="this.closest('.transactions-card').remove()">
+            <i data-lucide="x" style="width: 14px; height: 14px;"></i>
+        </button>
     </div>
 
     {% if transactions.is_empty() && !error.is_empty() %}
-    <div class="transactions-message">{{ error|safe }}</div>
+    <div class="transactions-message">
+        <i data-lucide="info" style="width: 20px; height: 20px; opacity: 0.5;"></i>
+        <span>{{ error }}</span>
+        {% if !explorer_url.is_empty() %}
+        <a href="{{ explorer_url }}" target="_blank" rel="noopener noreferrer">View on block explorer</a>
+        {% endif %}
+    </div>
     {% else if transactions.is_empty() %}
-    <div class="transactions-message">No transactions found.</div>
+    <div class="transactions-message">
+        <i data-lucide="inbox" style="width: 24px; height: 24px; opacity: 0.3;"></i>
+        <span>No transactions found</span>
+    </div>
     {% else %}
 
     {% if !error.is_empty() %}
-    <div class="transactions-note">{{ error|safe }}</div>
+    <div class="transactions-note">
+        <i data-lucide="info" style="width: 14px; height: 14px;"></i>
+        <span>{{ error }}</span>
+        {% if !explorer_url.is_empty() %}
+        <a href="{{ explorer_url }}" target="_blank" rel="noopener noreferrer">View on explorer</a>
+        {% endif %}
+    </div>
     {% endif %}
 
     <div class="transactions-table-wrapper">
-        <table class="transactions-table">
+        <table class="data-table transactions-table">
             <thead>
                 <tr>
                     <th>Date</th>
@@ -35,12 +52,16 @@
                     <td class="date-cell">{{ tx.date }}</td>
                     <td>
                         <span class="tx-type {{ tx.tx_type }}">
-                            {% if tx.tx_type == "deposit" %}+{% else %}-{% endif %}
+                            {% if tx.tx_type == "deposit" %}
+                            <i data-lucide="arrow-down-left" style="width: 12px; height: 12px;"></i>
+                            {% else %}
+                            <i data-lucide="arrow-up-right" style="width: 12px; height: 12px;"></i>
+                            {% endif %}
                         </span>
                     </td>
                     <td class="description-cell">{{ tx.description }}</td>
                     <td class="counterparty-cell">{{ tx.counterparty }}</td>
-                    <td class="amount-cell {% if tx.amount > 0.0 %}positive{% else if tx.amount < 0.0 %}negative{% endif %}">
+                    <td class="amount {% if tx.amount > 0.0 %}positive{% else if tx.amount < 0.0 %}negative{% endif %}">
                         {% if tx.amount >= 0.0 %}+{% endif %}{% if tx.currency == "USD" %}${% endif %}{{ tx.amount|format_amount }} {% if tx.currency != "USD" %}{{ tx.currency }}{% endif %}
                     </td>
                     <td>
@@ -53,7 +74,8 @@
     </div>
 
     <div class="transactions-footer">
-        Showing {{ transactions.len() }} most recent transactions
+        <i data-lucide="list" style="width: 14px; height: 14px;"></i>
+        <span>Showing {{ transactions.len() }} most recent transactions</span>
     </div>
 
     {% endif %}
@@ -61,132 +83,180 @@
 
 <style>
     .transactions-card {
-        background: var(--bg-secondary);
-        border: 1px solid var(--accent);
-        border-radius: 6px;
-        padding: 1rem;
-        margin-top: 0.5rem;
+        background: var(--bg-elevated);
+        border: 1px solid var(--orange-primary);
+        border-radius: var(--radius-lg);
+        margin: 12px 20px;
         animation: slideDown 0.2s ease;
+        overflow: hidden;
     }
+
     .transactions-header {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
-        margin-bottom: 1rem;
-        padding-bottom: 0.75rem;
-        border-bottom: 1px solid var(--border);
+        padding: 16px;
+        border-bottom: 1px solid var(--border-subtle);
     }
-    .transactions-header h3 {
-        margin: 0 0 0.25rem 0;
-        font-size: 1rem;
+
+    .transactions-info h3 {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 4px;
     }
+
     .account-type-badge {
-        font-size: 0.75rem;
-        color: var(--text-muted);
+        font-size: 11px;
+        color: var(--text-disabled);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
     }
+
     .transactions-message {
-        padding: 2rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 40px;
+        color: var(--text-disabled);
+        font-size: 13px;
         text-align: center;
-        color: var(--text-muted);
     }
+
     .transactions-message a {
-        color: var(--accent);
+        color: var(--orange-primary);
         word-break: break-all;
     }
+
     .transactions-note {
-        padding: 0.5rem 1rem;
-        margin-bottom: 1rem;
-        background: rgba(88, 166, 255, 0.1);
-        border-left: 3px solid var(--accent);
-        font-size: 0.8rem;
-        color: var(--text-muted);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        margin: 12px;
+        background: var(--orange-tint);
+        border-radius: var(--radius-md);
+        border-left: 3px solid var(--orange-primary);
+        font-size: 12px;
+        color: var(--text-secondary);
     }
+
     .transactions-note a {
-        color: var(--accent);
+        color: var(--orange-primary);
     }
+
     .transactions-table-wrapper {
         overflow-x: auto;
         max-height: 400px;
         overflow-y: auto;
     }
+
     .transactions-table {
-        width: 100%;
-        font-size: 0.875rem;
+        font-size: 13px;
     }
+
     .transactions-table th {
         position: sticky;
         top: 0;
-        background: var(--bg-secondary);
+        background: var(--bg-elevated);
         z-index: 1;
+        font-size: 11px;
     }
-    .transactions-table td, .transactions-table th {
-        padding: 0.5rem;
+
+    .transactions-table td {
+        padding: 12px 16px;
         white-space: nowrap;
     }
+
     .date-cell {
-        font-family: 'SF Mono', Monaco, monospace;
-        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--text-disabled);
     }
+
     .tx-type {
-        display: inline-block;
-        width: 20px;
-        height: 20px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
         border-radius: 50%;
-        text-align: center;
-        line-height: 20px;
-        font-weight: bold;
-        font-size: 0.75rem;
     }
+
     .tx-type.deposit {
-        background: rgba(63, 185, 80, 0.2);
-        color: var(--success);
+        background: var(--green-tint);
+        color: var(--green-success);
     }
+
     .tx-type.withdrawal {
-        background: rgba(248, 81, 73, 0.2);
-        color: var(--danger);
+        background: rgba(239, 68, 68, 0.1);
+        color: var(--red-error);
     }
+
     .description-cell {
         max-width: 200px;
         overflow: hidden;
         text-overflow: ellipsis;
     }
+
     .counterparty-cell {
         max-width: 150px;
         overflow: hidden;
         text-overflow: ellipsis;
-        color: var(--text-muted);
+        color: var(--text-disabled);
     }
-    .amount-cell {
+
+    .amount {
         text-align: right;
-        font-family: 'SF Mono', Monaco, monospace;
-        font-weight: 600;
+        font-family: var(--font-mono);
+        font-weight: 500;
     }
-    .amount-cell.positive { color: var(--success); }
-    .amount-cell.negative { color: var(--danger); }
+
+    .amount.positive {
+        color: var(--green-success);
+    }
+
+    .amount.negative {
+        color: var(--red-error);
+    }
+
     .status-badge {
-        font-size: 0.7rem;
-        padding: 0.125rem 0.5rem;
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 500;
+        padding: 3px 8px;
         border-radius: 999px;
         text-transform: uppercase;
+        letter-spacing: 0.3px;
     }
-    .status-badge.sent, .status-badge.pending {
-        background: rgba(210, 153, 34, 0.2);
-        color: var(--warning);
+
+    .status-badge.sent,
+    .status-badge.pending {
+        background: rgba(255, 92, 0, 0.1);
+        color: var(--orange-primary);
     }
-    .status-badge.completed, .status-badge.posted {
-        background: rgba(63, 185, 80, 0.2);
-        color: var(--success);
+
+    .status-badge.completed,
+    .status-badge.posted {
+        background: var(--green-tint);
+        color: var(--green-success);
     }
-    .status-badge.failed, .status-badge.cancelled {
-        background: rgba(248, 81, 73, 0.2);
-        color: var(--danger);
+
+    .status-badge.failed,
+    .status-badge.cancelled {
+        background: rgba(239, 68, 68, 0.1);
+        color: var(--red-error);
     }
+
     .transactions-footer {
-        margin-top: 1rem;
-        padding-top: 0.75rem;
-        border-top: 1px solid var(--border);
-        font-size: 0.75rem;
-        color: var(--text-muted);
-        text-align: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 12px;
+        border-top: 1px solid var(--border-subtle);
+        font-size: 12px;
+        color: var(--text-disabled);
     }
 </style>

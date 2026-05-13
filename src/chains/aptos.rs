@@ -36,7 +36,8 @@ struct ViewRequest {
 
 impl AptosClient {
     pub fn new(api_url: Option<String>) -> Self {
-        let url = api_url.unwrap_or_else(|| "https://fullnode.mainnet.aptoslabs.com/v1".to_string());
+        let url =
+            api_url.unwrap_or_else(|| "https://fullnode.mainnet.aptoslabs.com/v1".to_string());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -94,9 +95,7 @@ impl AptosClient {
             .await
             .context("Failed to parse view response")?;
 
-        let balance_octas: u64 = result.first()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let balance_octas: u64 = result.first().and_then(|s| s.parse().ok()).unwrap_or(0);
 
         // Convert octas to APT (1 APT = 10^8 octas)
         let apt_balance = balance_octas as f64 / 100_000_000.0;
@@ -116,8 +115,10 @@ impl AptosClient {
 }
 
 // Implement PriceEnrichable trait for Aptos balances
-impl crate::PriceEnrichable for AccountBalances {
-    const NATIVE_SYMBOL: &'static str = "APT";
+impl crate::types::PriceEnrichable for AccountBalances {
+    fn native_symbol(&self) -> &str {
+        "APT"
+    }
 
     fn native_balance(&self) -> f64 {
         self.apt_balance

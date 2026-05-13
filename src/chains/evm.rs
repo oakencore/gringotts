@@ -1,14 +1,17 @@
-use anyhow::{Context, Result};
 use crate::storage::Chain;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::env;
 use std::collections::HashMap;
+use std::env;
 
 fn get_alchemy_rpc_url(chain: &Chain, api_key: &str) -> Option<String> {
     match chain {
         Chain::Ethereum => Some(format!("https://eth-mainnet.g.alchemy.com/v2/{}", api_key)),
-        Chain::Polygon => Some(format!("https://polygon-mainnet.g.alchemy.com/v2/{}", api_key)),
+        Chain::Polygon => Some(format!(
+            "https://polygon-mainnet.g.alchemy.com/v2/{}",
+            api_key
+        )),
         Chain::Arbitrum => Some(format!("https://arb-mainnet.g.alchemy.com/v2/{}", api_key)),
         Chain::Optimism => Some(format!("https://opt-mainnet.g.alchemy.com/v2/{}", api_key)),
         Chain::Base => Some(format!("https://base-mainnet.g.alchemy.com/v2/{}", api_key)),
@@ -109,6 +112,7 @@ pub struct AccountBalances {
     pub eth_usd_value: Option<f64>,
     pub token_balances: Vec<TokenBalance>,
     pub total_usd_value: Option<f64>,
+    pub native_symbol: String,
 }
 
 pub struct EvmClient {
@@ -204,10 +208,8 @@ impl EvmClient {
             .ok_or_else(|| anyhow::anyhow!("Invalid balance format"))?;
 
         // Convert hex string to u128
-        let balance_wei = u128::from_str_radix(
-            balance_str.trim_start_matches("0x"),
-            16
-        ).context("Failed to parse balance")?;
+        let balance_wei = u128::from_str_radix(balance_str.trim_start_matches("0x"), 16)
+            .context("Failed to parse balance")?;
 
         // Convert wei to ETH (1 ETH = 10^18 wei)
         let eth_balance = balance_wei as f64 / 1_000_000_000_000_000_000.0;
@@ -236,10 +238,15 @@ impl EvmClient {
             eth_usd_value: None,
             token_balances,
             total_usd_value: None,
+            native_symbol: self.chain.native_token_symbol().to_string(),
         })
     }
 
-    async fn query_erc20_balance(&self, wallet_address: &str, token_address: &str) -> Result<Option<TokenBalance>> {
+    async fn query_erc20_balance(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+    ) -> Result<Option<TokenBalance>> {
         // ERC20 balanceOf(address) function signature
         let balance_of_sig = "0x70a08231";
 
@@ -249,26 +256,49 @@ impl EvmClient {
         let data = format!("{}{}", balance_of_sig, padded_address);
 
         // Call eth_call
-        let result = self.rpc_call("eth_call", json!([
-            {
-                "to": token_address,
-                "data": data
-            },
-            "latest"
-        ])).await?;
+        let result = self
+            .rpc_call(
+                "eth_call",
+                json!([
+                    {
+                        "to": token_address,
+                        "data": data
+                    },
+                    "latest"
+                ]),
+            )
+            .await?;
 
         let balance_hex = result
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid balance format"))?;
 
-        // Parse balance
-        let balance_u256 = u128::from_str_radix(
-            balance_hex.trim_start_matches("0x"),
-            16
-        ).unwrap_or(0);
+        // Parse balance - ERC20 returns uint256 but u128 covers all practical balances
+        let hex_clean = balance_hex.trim_start_matches("0x");
+        let balance_u128 = match u128::from_str_radix(hex_clean, 16) {
+            Ok(v) => v,
+            Err(_) => {
+                // Balance exceeds u128 - check if all high bits are zero
+                if hex_clean.len() > 32 {
+                    let high_part = &hex_clean[..hex_clean.len() - 32];
+                    let low_part = &hex_clean[hex_clean.len() - 32..];
+                    if high_part.chars().all(|c| c == '0') {
+                        u128::from_str_radix(low_part, 16).unwrap_or(0)
+                    } else {
+                        eprintln!(
+                            "Warning: Token balance exceeds u128 for contract {}",
+                            token_address
+                        );
+                        return Ok(None);
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+        };
 
         // If balance is zero, return None
-        if balance_u256 == 0 {
+        if balance_u128 == 0 {
             return Ok(None);
         }
 
@@ -279,7 +309,7 @@ impl EvmClient {
 
         // Calculate UI amount
         let divisor = 10_u128.pow(decimals as u32) as f64;
-        let ui_amount = balance_u256 as f64 / divisor;
+        let ui_amount = balance_u128 as f64 / divisor;
 
         Ok(Some(TokenBalance {
             contract_address: token_address.to_string(),
@@ -296,22 +326,24 @@ impl EvmClient {
         // decimals() function signature
         let decimals_sig = "0x313ce567";
 
-        let result = self.rpc_call("eth_call", json!([
-            {
-                "to": token_address,
-                "data": decimals_sig
-            },
-            "latest"
-        ])).await?;
+        let result = self
+            .rpc_call(
+                "eth_call",
+                json!([
+                    {
+                        "to": token_address,
+                        "data": decimals_sig
+                    },
+                    "latest"
+                ]),
+            )
+            .await?;
 
         let decimals_hex = result
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid decimals format"))?;
 
-        let decimals = u8::from_str_radix(
-            decimals_hex.trim_start_matches("0x"),
-            16
-        ).unwrap_or(18);
+        let decimals = u8::from_str_radix(decimals_hex.trim_start_matches("0x"), 16).unwrap_or(18);
 
         Ok(decimals)
     }
@@ -320,13 +352,18 @@ impl EvmClient {
         // name() function signature
         let name_sig = "0x06fdde03";
 
-        let result = self.rpc_call("eth_call", json!([
-            {
-                "to": token_address,
-                "data": name_sig
-            },
-            "latest"
-        ])).await?;
+        let result = self
+            .rpc_call(
+                "eth_call",
+                json!([
+                    {
+                        "to": token_address,
+                        "data": name_sig
+                    },
+                    "latest"
+                ]),
+            )
+            .await?;
 
         let name_hex = result
             .as_str()
@@ -341,13 +378,18 @@ impl EvmClient {
         // symbol() function signature
         let symbol_sig = "0x95d89b41";
 
-        let result = self.rpc_call("eth_call", json!([
-            {
-                "to": token_address,
-                "data": symbol_sig
-            },
-            "latest"
-        ])).await?;
+        let result = self
+            .rpc_call(
+                "eth_call",
+                json!([
+                    {
+                        "to": token_address,
+                        "data": symbol_sig
+                    },
+                    "latest"
+                ]),
+            )
+            .await?;
 
         let symbol_hex = result
             .as_str()
@@ -361,31 +403,50 @@ impl EvmClient {
     fn decode_string_from_hex(&self, hex: &str) -> Result<String> {
         let hex_clean = hex.trim_start_matches("0x");
 
-        // Skip the first 64 characters (offset and length encoding)
+        // ABI encoding: [offset 32 bytes][length 32 bytes][data...]
+        // offset is at chars 0..64, length at 64..128, data starts at 128
         if hex_clean.len() < 128 {
             return Ok(String::new());
         }
 
+        // Read the string length from bytes 32-63 (hex chars 64-127)
+        let length_hex = &hex_clean[64..128];
+        let string_length =
+            usize::from_str_radix(length_hex.trim_start_matches('0'), 16).unwrap_or(0);
+
+        if string_length == 0 {
+            return Ok(String::new());
+        }
+
         let data_hex = &hex_clean[128..];
+        // Only read exactly string_length bytes (string_length * 2 hex chars)
+        let data_end = (string_length * 2).min(data_hex.len());
+        let data_hex = &data_hex[..data_end];
 
         // Convert hex to bytes
         let bytes: Vec<u8> = (0..data_hex.len())
             .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&data_hex[i..i+2], 16).ok())
+            .filter_map(|i| {
+                if i + 2 <= data_hex.len() {
+                    u8::from_str_radix(&data_hex[i..i + 2], 16).ok()
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        // Convert to UTF-8 string, removing null bytes
-        let result = String::from_utf8_lossy(&bytes)
-            .trim_end_matches('\0')
-            .to_string();
+        // Convert to UTF-8 string
+        let result = String::from_utf8_lossy(&bytes).to_string();
 
         Ok(result)
     }
 }
 
 // Implement PriceEnrichable trait for EVM balances
-impl crate::PriceEnrichable for AccountBalances {
-    const NATIVE_SYMBOL: &'static str = "ETH";
+impl crate::types::PriceEnrichable for AccountBalances {
+    fn native_symbol(&self) -> &str {
+        &self.native_symbol
+    }
 
     fn native_balance(&self) -> f64 {
         self.eth_balance

@@ -1,258 +1,413 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="header">
-    <h1>Gringotts</h1>
-    <div class="actions">
-        <button id="query-btn" class="btn btn-primary"
-                hx-get="/balances"
-                hx-target="#balances"
-                hx-swap="innerHTML"
-                hx-indicator="#query-btn"
-                hx-on::before-request="document.getElementById('balances').innerHTML = document.getElementById('loading-template').innerHTML; document.getElementById('balances').scrollIntoView({behavior: 'smooth'});"
-                hx-on::after-request="document.getElementById('balances').scrollIntoView({behavior: 'smooth'});">
-            <span class="spinner htmx-indicator"></span>
-            <span class="btn-text">Query All Balances</span>
+<!-- Page Header -->
+<div class="page-header">
+    <div class="header-left">
+        <h1 class="page-title">Portfolio Overview</h1>
+        <p class="page-subtitle">Track your crypto holdings across all wallets and chains</p>
+    </div>
+    <div class="header-actions">
+        <button class="btn btn-primary" onclick="document.getElementById('add-wallet-modal').showModal()">
+            <i data-lucide="plus"></i>
+            <span>Add Wallet</span>
         </button>
     </div>
 </div>
 
+<!-- Loading Template -->
 <template id="loading-template">
-    <div class="card loading-card">
-        <div class="loading-content">
-            <div class="spinner large"></div>
-            <h2>Querying Balances...</h2>
-            <p class="text-muted">Fetching data from blockchains and banking APIs. This may take a moment.</p>
+    <div class="card">
+        <div class="loading-card">
+            <div class="loading-content">
+                <div class="spinner large"></div>
+                <h2>Querying Balances...</h2>
+                <p class="text-muted">Fetching data from blockchains and banking APIs</p>
+            </div>
         </div>
     </div>
 </template>
 
-<div class="summary">
-    <div class="summary-card card total-card" id="total-balance-card">
-        <div class="summary-value" id="total-balance">--</div>
-        <div class="summary-label">Total Portfolio Value</div>
-    </div>
-    <div class="summary-card card">
-        <div class="summary-value">{{ wallet_count }}</div>
-        <div class="summary-label">Wallets</div>
-    </div>
-    <div class="summary-card card">
-        <div class="summary-value">{{ bank_count }}</div>
-        <div class="summary-label">Bank Accounts</div>
-    </div>
-    <div class="summary-card card">
-        <div class="summary-value">{{ companies.len() }}</div>
-        <div class="summary-label">Companies</div>
-    </div>
-</div>
-
-<div class="card">
-    <h2>Add Account</h2>
-    <form hx-post="/accounts" hx-on::after-request="if(event.detail.successful) { this.reset(); window.location.reload(); }">
-        <div class="form-row">
-            <input type="text" name="company" placeholder="Company (optional)">
-            <input type="text" name="name" placeholder="Name" required>
-            <input type="text" name="address" placeholder="Address" required>
-            <select name="chain">
-                <option value="">Auto-detect chain</option>
-                <option value="solana">Solana</option>
-                <option value="ethereum">Ethereum</option>
-                <option value="polygon">Polygon</option>
-                <option value="arbitrum">Arbitrum</option>
-                <option value="optimism">Optimism</option>
-                <option value="base">Base</option>
-                <option value="avalanche">Avalanche</option>
-                <option value="bsc">BSC</option>
-                <option value="near">NEAR</option>
-                <option value="aptos">Aptos</option>
-                <option value="sui">Sui</option>
-                <option value="starknet">Starknet</option>
-            </select>
-            <button type="submit" class="btn btn-primary">Add</button>
+<!-- Metrics Row -->
+<div class="metrics-row">
+    <!-- Total Portfolio Value -->
+    <div class="metric-card">
+        <div class="metric-card-header">
+            <span class="metric-label">Total Portfolio Value</span>
         </div>
-    </form>
-</div>
-
-<div id="accounts-container">
-{% for company in companies %}
-<div class="card company-card" id="company-{{ company.name|replace(" ", "-") }}">
-    <div class="company-header">
-        <h2>{{ company.name }}</h2>
-        <span class="company-count">{{ company.wallets.len() + company.banking_accounts.len() }} account(s)</span>
+        <div class="metric-value" id="total-balance">--</div>
     </div>
 
-    {% if !company.wallets.is_empty() %}
-    <div class="account-section">
-        <h3 class="section-title">Crypto Wallets</h3>
-        <table>
+    <!-- Last Refresh -->
+    <div class="metric-card">
+        <div class="metric-card-header">
+            <span class="metric-label">Last Refresh</span>
+            <span class="status-indicator success" id="sync-status">
+                <i data-lucide="check-circle"></i>
+                <span>Synced</span>
+            </span>
+        </div>
+        <div class="metric-value" id="last-refresh">--</div>
+        <div class="metric-info">
+            <i data-lucide="refresh-cw"></i>
+            <span id="next-refresh">Auto-refresh enabled</span>
+        </div>
+    </div>
+
+    <!-- Wallets Count -->
+    <div class="metric-card">
+        <div class="metric-card-header">
+            <span class="metric-label">Wallets</span>
+        </div>
+        <div class="metric-value">{{ wallet_count }}</div>
+        <div class="metric-info">
+            <i data-lucide="wallet"></i>
+            <span>Across {{ companies.len() }} companies</span>
+        </div>
+    </div>
+
+    <!-- Bank Accounts -->
+    <div class="metric-card">
+        <div class="metric-card-header">
+            <span class="metric-label">Bank Accounts</span>
+        </div>
+        <div class="metric-value">{{ bank_count }}</div>
+        <div class="metric-info">
+            <i data-lucide="landmark"></i>
+            <span>Connected accounts</span>
+        </div>
+    </div>
+</div>
+
+<!-- Holdings Section -->
+<div class="holdings-section">
+    <div class="card-header">
+        <span class="card-title">Holdings</span>
+        <div class="header-actions">
+            <button id="query-btn" class="btn btn-secondary btn-sm"
+                    hx-get="/balances"
+                    hx-target="#holdings-content"
+                    hx-swap="innerHTML"
+                    hx-indicator="#query-btn"
+                    hx-on::before-request="showLoadingState()">
+                <span class="spinner htmx-indicator"></span>
+                <i data-lucide="refresh-cw"></i>
+                <span class="btn-text">Refresh All</span>
+            </button>
+        </div>
+    </div>
+    <div class="card" id="holdings-content">
+        {% if companies.is_empty() %}
+        <div class="empty">
+            <i data-lucide="wallet" style="width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.3;"></i>
+            <p>No accounts tracked yet</p>
+            <p class="text-muted" style="margin-top: 8px;">Add a wallet or bank account to get started</p>
+        </div>
+        {% else %}
+        <table class="data-table">
             <thead>
                 <tr>
-                    <th>Name</th>
-                    <th>Address</th>
+                    <th>Asset</th>
+                    <th>Company</th>
                     <th>Chain</th>
+                    <th style="text-align: right;">Balance</th>
+                    <th style="text-align: right;">Price</th>
+                    <th style="text-align: right;">Value</th>
                     <th></th>
                 </tr>
             </thead>
-            {% for wallet in company.wallets %}
-            <tbody id="account-{{ wallet.name|replace(" ", "-") }}">
-                <tr>
-                    <td><strong>{{ wallet.name }}</strong></td>
-                    <td class="truncate amount">{{ wallet.address }}</td>
+            <tbody>
+                {% for company in companies %}
+                {% for wallet in company.wallets %}
+                <tr id="row-{{ wallet.name|replace(" ", "-") }}">
+                    <td>
+                        <div class="asset-info">
+                            <div class="asset-icon">
+                                <i data-lucide="wallet" style="width: 16px; height: 16px;"></i>
+                            </div>
+                            <div>
+                                <div class="asset-name">{{ wallet.name }}</div>
+                                <div class="asset-symbol truncate">{{ wallet.address }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td>{{ company.name }}</td>
                     <td><span class="chain-badge">{{ wallet.chain }}</span></td>
-                    <td class="actions-cell">
-                        <button class="btn btn-sm"
-                                hx-get="/balances/{{ wallet.name }}"
-                                hx-target="#balance-{{ wallet.name|replace(" ", "-") }}"
-                                hx-swap="innerHTML"
-                                hx-indicator="#spinner-{{ wallet.name|replace(" ", "-") }}">
-                            <span class="spinner htmx-indicator" id="spinner-{{ wallet.name|replace(" ", "-") }}"></span>
-                            Query
-                        </button>
-                        <button class="btn btn-sm"
-                                hx-get="/transactions/{{ wallet.name }}"
-                                hx-target="#balance-{{ wallet.name|replace(" ", "-") }}"
-                                hx-swap="innerHTML"
-                                hx-indicator="#tx-spinner-{{ wallet.name|replace(" ", "-") }}">
-                            <span class="spinner htmx-indicator" id="tx-spinner-{{ wallet.name|replace(" ", "-") }}"></span>
-                            Txns
-                        </button>
-                        <button class="btn btn-sm btn-danger"
-                                hx-delete="/accounts/{{ wallet.name }}"
-                                hx-target="#account-{{ wallet.name|replace(" ", "-") }}"
-                                hx-swap="outerHTML"
-                                hx-confirm="Remove {{ wallet.name }}?">
-                            Remove
-                        </button>
+                    <td class="amount">--</td>
+                    <td class="amount">--</td>
+                    <td class="amount">--</td>
+                    <td>
+                        <div class="row-actions">
+                            <button class="btn btn-secondary btn-sm"
+                                    hx-get="/balances/{{ wallet.name }}"
+                                    hx-target="#detail-{{ wallet.name|replace(" ", "-") }}"
+                                    hx-swap="innerHTML"
+                                    hx-indicator="#spinner-{{ wallet.name|replace(" ", "-") }}">
+                                <span class="spinner htmx-indicator" id="spinner-{{ wallet.name|replace(" ", "-") }}"></span>
+                                Query
+                            </button>
+                            <button class="btn btn-secondary btn-sm"
+                                    hx-get="/transactions/{{ wallet.name }}"
+                                    hx-target="#detail-{{ wallet.name|replace(" ", "-") }}"
+                                    hx-swap="innerHTML">
+                                Txns
+                            </button>
+                            <button class="btn btn-secondary btn-sm btn-danger"
+                                    hx-delete="/accounts/{{ wallet.name }}"
+                                    hx-target="#row-{{ wallet.name|replace(" ", "-") }}"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Remove {{ wallet.name }}?">
+                                <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
-                <tr class="balance-row">
-                    <td colspan="4" id="balance-{{ wallet.name|replace(" ", "-") }}"></td>
+                <tr class="detail-row">
+                    <td colspan="7" id="detail-{{ wallet.name|replace(" ", "-") }}"></td>
                 </tr>
-            </tbody>
-            {% endfor %}
-        </table>
-    </div>
-    {% endif %}
-
-    {% if !company.banking_accounts.is_empty() %}
-    <div class="account-section">
-        <h3 class="section-title">Bank Accounts</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Account ID</th>
-                    <th>Service</th>
-                    <th></th>
-                </tr>
-            </thead>
-            {% for account in company.banking_accounts %}
-            <tbody id="account-{{ account.name|replace(" ", "-") }}">
-                <tr>
-                    <td><strong>{{ account.name }}</strong></td>
-                    <td class="truncate amount">{{ account.account_id }}</td>
+                {% endfor %}
+                {% for account in company.banking_accounts %}
+                <tr id="row-{{ account.name|replace(" ", "-") }}">
+                    <td>
+                        <div class="asset-info">
+                            <div class="asset-icon" style="background: var(--green-tint);">
+                                <i data-lucide="landmark" style="width: 16px; height: 16px; color: var(--green-success);"></i>
+                            </div>
+                            <div>
+                                <div class="asset-name">{{ account.name }}</div>
+                                <div class="asset-symbol truncate">{{ account.account_id }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td>{{ company.name }}</td>
                     <td><span class="chain-badge bank">{{ account.service }}</span></td>
-                    <td class="actions-cell">
-                        <button class="btn btn-sm"
-                                hx-get="/balances/{{ account.name }}"
-                                hx-target="#balance-{{ account.name|replace(" ", "-") }}"
-                                hx-swap="innerHTML"
-                                hx-indicator="#spinner-{{ account.name|replace(" ", "-") }}">
-                            <span class="spinner htmx-indicator" id="spinner-{{ account.name|replace(" ", "-") }}"></span>
-                            Query
-                        </button>
-                        <button class="btn btn-sm"
-                                hx-get="/transactions/{{ account.name }}"
-                                hx-target="#balance-{{ account.name|replace(" ", "-") }}"
-                                hx-swap="innerHTML"
-                                hx-indicator="#tx-spinner-{{ account.name|replace(" ", "-") }}">
-                            <span class="spinner htmx-indicator" id="tx-spinner-{{ account.name|replace(" ", "-") }}"></span>
-                            Txns
-                        </button>
-                        <button class="btn btn-sm btn-danger"
-                                hx-delete="/accounts/{{ account.name }}"
-                                hx-target="#account-{{ account.name|replace(" ", "-") }}"
-                                hx-swap="outerHTML"
-                                hx-confirm="Remove {{ account.name }}?">
-                            Remove
-                        </button>
+                    <td class="amount">--</td>
+                    <td class="amount">--</td>
+                    <td class="amount">--</td>
+                    <td>
+                        <div class="row-actions">
+                            <button class="btn btn-secondary btn-sm"
+                                    hx-get="/balances/{{ account.name }}"
+                                    hx-target="#detail-{{ account.name|replace(" ", "-") }}"
+                                    hx-swap="innerHTML"
+                                    hx-indicator="#spinner-{{ account.name|replace(" ", "-") }}">
+                                <span class="spinner htmx-indicator" id="spinner-{{ account.name|replace(" ", "-") }}"></span>
+                                Query
+                            </button>
+                            <button class="btn btn-secondary btn-sm"
+                                    hx-get="/transactions/{{ account.name }}"
+                                    hx-target="#detail-{{ account.name|replace(" ", "-") }}"
+                                    hx-swap="innerHTML">
+                                Txns
+                            </button>
+                            <button class="btn btn-secondary btn-sm btn-danger"
+                                    hx-delete="/accounts/{{ account.name }}"
+                                    hx-target="#row-{{ account.name|replace(" ", "-") }}"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Remove {{ account.name }}?">
+                                <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
-                <tr class="balance-row">
-                    <td colspan="4" id="balance-{{ account.name|replace(" ", "-") }}"></td>
+                <tr class="detail-row">
+                    <td colspan="7" id="detail-{{ account.name|replace(" ", "-") }}"></td>
                 </tr>
+                {% endfor %}
+                {% endfor %}
             </tbody>
-            {% endfor %}
         </table>
+        {% endif %}
     </div>
-    {% endif %}
-</div>
-{% endfor %}
-
-{% if companies.is_empty() %}
-<div class="card">
-    <div class="empty">No accounts tracked yet. Add one above to get started.</div>
-</div>
-{% endif %}
 </div>
 
+<!-- Balances Result Area -->
 <div id="balances"></div>
 
+<!-- Add Wallet Modal -->
+<dialog id="add-wallet-modal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>Add Account</h2>
+            <button class="btn btn-secondary btn-sm" onclick="this.closest('dialog').close()">
+                <i data-lucide="x"></i>
+            </button>
+        </div>
+        <form hx-post="/accounts" hx-on::after-request="handleFormSubmit(event)">
+            <div class="form-group">
+                <label>Company (optional)</label>
+                <input type="text" name="company" placeholder="e.g., My Company">
+            </div>
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" name="name" placeholder="e.g., Main Wallet" required>
+            </div>
+            <div class="form-group">
+                <label>Address</label>
+                <input type="text" name="address" placeholder="Wallet address or account ID" required>
+            </div>
+            <div class="form-group">
+                <label>Chain</label>
+                <select name="chain">
+                    <option value="">Auto-detect chain</option>
+                    <option value="solana">Solana</option>
+                    <option value="ethereum">Ethereum</option>
+                    <option value="polygon">Polygon</option>
+                    <option value="arbitrum">Arbitrum</option>
+                    <option value="optimism">Optimism</option>
+                    <option value="base">Base</option>
+                    <option value="avalanche">Avalanche</option>
+                    <option value="bsc">BSC</option>
+                    <option value="core">Core</option>
+                    <option value="near">NEAR</option>
+                    <option value="aptos">Aptos</option>
+                    <option value="sui">Sui</option>
+                    <option value="starknet">Starknet</option>
+                </select>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Add Account</button>
+            </div>
+        </form>
+    </div>
+</dialog>
+
 <style>
-    .company-header {
+    .header-left {
         display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-        padding-bottom: 0.75rem;
-        border-bottom: 1px solid var(--border);
+        flex-direction: column;
+        gap: 8px;
     }
-    .company-header h2 {
-        margin: 0;
-        color: var(--text);
-    }
-    .company-count {
-        color: var(--text-muted);
-        font-size: 0.875rem;
-    }
-    .account-section {
-        margin-top: 1rem;
-    }
-    .section-title {
-        font-size: 0.75rem;
-        text-transform: uppercase;
-        color: var(--text-muted);
-        margin-bottom: 0.5rem;
-        font-weight: 500;
-    }
-    .company-card {
-        margin-bottom: 1.5rem;
-    }
-    .chain-badge.bank {
-        background: #238636;
-    }
-    .actions-cell {
+
+    .header-actions {
         display: flex;
-        gap: 0.5rem;
+        gap: 12px;
+    }
+
+    .holdings-section {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        flex: 1;
+    }
+
+    .holdings-section .card-header {
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+
+    .row-actions {
+        display: flex;
+        gap: 8px;
         justify-content: flex-end;
     }
-    .balance-row td {
+
+    .detail-row td {
         padding: 0;
         border: none;
     }
-    .balance-row td:empty {
+
+    .detail-row td:empty {
         display: none;
     }
-    .total-card {
-        background: linear-gradient(135deg, #238636 0%, #2ea043 100%);
-        border-color: #238636;
+
+    /* Modal Styles */
+    .modal {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        padding: 0;
+        max-width: 480px;
+        width: 90%;
     }
-    .total-card .summary-value {
-        color: #fff;
-        font-size: 2rem;
+
+    .modal::backdrop {
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(4px);
     }
-    .total-card .summary-label {
-        color: rgba(255,255,255,0.8);
+
+    .modal-content {
+        padding: 24px;
+    }
+
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 24px;
+    }
+
+    .modal-header h2 {
+        font-family: var(--font-display);
+        font-size: 24px;
+        font-weight: normal;
+    }
+
+    .form-group {
+        margin-bottom: 16px;
+    }
+
+    .form-group label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text-secondary);
+    }
+
+    .form-group input,
+    .form-group select {
+        width: 100%;
+    }
+
+    .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+        margin-top: 24px;
+        padding-top: 24px;
+        border-top: 1px solid var(--border-subtle);
     }
 </style>
+
+<script>
+    // Show loading state using template cloning (safer than innerHTML)
+    function showLoadingState() {
+        var template = document.getElementById('loading-template');
+        var target = document.getElementById('holdings-content');
+        target.replaceChildren(template.content.cloneNode(true));
+    }
+
+    // Handle form submission
+    function handleFormSubmit(event) {
+        if (event.detail.successful) {
+            event.target.reset();
+            document.getElementById('add-wallet-modal').close();
+            window.location.reload();
+        }
+    }
+
+    // Close modal on click outside
+    document.getElementById('add-wallet-modal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            this.close();
+        }
+    });
+
+    // Update refresh time display using textContent (safe)
+    function updateRefreshTime() {
+        var now = new Date();
+        var timeStr = now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        document.getElementById('last-refresh').textContent = timeStr;
+    }
+
+    // Listen for balance updates
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (evt.detail.target.id === 'holdings-content' || evt.detail.target.id === 'balances') {
+            updateRefreshTime();
+        }
+    });
+</script>
 {% endblock %}
