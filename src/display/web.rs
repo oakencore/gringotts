@@ -493,9 +493,14 @@ fn build_balances_tsv(companies: &[(String, Vec<WalletGroup>)]) -> String {
                 } else {
                     String::new()
                 };
+                let amount_str = if asset.symbol == "USD" {
+                    format!("{:.2}", asset.amount)
+                } else {
+                    format!("{:.6}", asset.amount)
+                };
                 tsv.push_str(&format!(
-                    "{}\t{}\t{}\t{:.6}\t{}\n",
-                    company_clean, wallet_clean, symbol_clean, asset.amount, usd_cell
+                    "{}\t{}\t{}\t{}\t{}\n",
+                    company_clean, wallet_clean, symbol_clean, amount_str, usd_cell
                 ));
             }
         }
@@ -528,17 +533,24 @@ fn build_single_balance_tsv(
         } else {
             String::new()
         };
+        let amount_str = if symbol == "USD" {
+            format!("{:.2}", amount)
+        } else {
+            format!("{:.6}", amount)
+        };
         tsv.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
             wallet_clean,
             chain_clean,
             address_clean,
             escape_tsv(symbol),
-            amount,
+            amount_str,
             usd_cell
         ));
     };
 
+    // Skip the native row when balance is zero. The visible UI shows it for layout
+    // symmetry, but the spreadsheet export benefits from omitting empty rows.
     if native_balance != 0.0 {
         emit_row(&mut tsv, native_symbol, native_balance, native_usd);
     }
@@ -4181,6 +4193,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_balances_tsv_usd_uses_two_decimal_precision() {
+        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
+            "Acme".to_string(),
+            vec![WalletGroup {
+                name: "BankA".to_string(),
+                total_usd: 1500.0,
+                assets: vec![AssetView {
+                    symbol: "USD".to_string(),
+                    amount: 1500.0,
+                    usd_value: 1500.0,
+                }],
+            }],
+        )];
+        let tsv = build_balances_tsv(&companies);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines[1], "Acme\tBankA\tUSD\t1500.00\t1500.00");
+    }
+
+    #[test]
     fn test_build_single_balance_tsv_includes_native_and_tokens() {
         let tokens = vec![
             TokenView {
@@ -4231,10 +4262,7 @@ mod tests {
             build_single_balance_tsv("BankA", "Mercury", "acc_123", "USD", 1500.0, 1500.0, &[]);
         let lines: Vec<&str> = tsv.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(
-            lines[1],
-            "BankA\tMercury\tacc_123\tUSD\t1500.000000\t1500.00"
-        );
+        assert_eq!(lines[1], "BankA\tMercury\tacc_123\tUSD\t1500.00\t1500.00");
     }
 
     #[test]
