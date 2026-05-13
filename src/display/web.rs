@@ -455,7 +455,7 @@ pub async fn start_server(
     // Spawn background refresh task
     let refresh_state = state.clone();
     tokio::spawn(async move {
-        background_refresh_task(refresh_state, interval).await;
+        background_refresh_task(refresh_state).await;
     });
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -464,16 +464,16 @@ pub async fn start_server(
     Ok(())
 }
 
-/// Background task that refreshes balances on a configured interval
-async fn background_refresh_task(state: Arc<AppState>, interval: Duration) {
-    let mut ticker = tokio::time::interval(interval);
-
+/// Background task that refreshes balances on a configurable interval.
+/// Reads the current interval from state on each loop iteration so the
+/// Settings UI's POST to /settings/refresh-interval takes effect on the
+/// next tick.
+async fn background_refresh_task(state: Arc<AppState>) {
     // Skip the first immediate tick - don't refresh right at startup
-    ticker.tick().await;
+    let initial = *state.refresh_interval_secs.read().await;
+    tokio::time::sleep(Duration::from_secs(initial)).await;
 
     loop {
-        ticker.tick().await;
-
         println!(
             "[{}] Starting background refresh...",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -491,6 +491,9 @@ async fn background_refresh_task(state: Arc<AppState>, interval: Duration) {
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
             );
         }
+
+        let next = *state.refresh_interval_secs.read().await;
+        tokio::time::sleep(Duration::from_secs(next)).await;
     }
 }
 
