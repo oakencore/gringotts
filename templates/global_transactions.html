@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div class="header-left">
+        <h1 class="page-title">Transactions</h1>
+        <p class="page-subtitle">Recent activity across Solana wallets and Mercury accounts (top 100, newest first)</p>
+    </div>
+</div>
+
+{% if rows.is_empty() %}
+<div class="card">
+    <div class="empty">
+        <i data-lucide="inbox" style="width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.3;"></i>
+        <p>No transactions found</p>
+        <p class="text-muted" style="margin-top: 8px;">
+            Transaction history is currently only supported for Solana wallets and Mercury bank accounts.
+            Add a Solana wallet or Mercury account to see transactions here.
+        </p>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Source</th>
+                <th>Description</th>
+                <th style="text-align: right;">Amount</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td class="amount">{{ row.date }}</td>
+                <td>
+                    <div class="source-cell">
+                        <span class="source-name">{{ row.source_name }}</span>
+                        <span class="chain-badge {% if row.source_chain == "Mercury" %}bank{% endif %}">{{ row.source_chain }}</span>
+                    </div>
+                </td>
+                <td class="truncate" style="max-width: 320px;">{{ row.description }}</td>
+                <td class="amount {% if row.amount >= 0.0 %}positive{% else %}negative{% endif %}">
+                    {% if row.amount >= 0.0 %}+{% endif %}{{ row.amount|format_amount }} {{ row.currency }}
+                </td>
+                <td>{{ row.status }}</td>
+                <td>
+                    {% if !row.explorer_url.is_empty() %}
+                    <a href="{{ row.explorer_url }}" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">
+                        <i data-lucide="external-link" style="width: 14px; height: 14px;"></i>
+                    </a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<style>
+    .source-cell {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .source-name {
+        font-weight: 500;
+    }
+    .amount.negative {
+        color: var(--red-error);
+    }
+</style>
+{% endblock %}

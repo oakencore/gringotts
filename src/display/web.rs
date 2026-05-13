@@ -158,7 +158,6 @@ struct TransactionView {
     counterparty: String,
 }
 
-#[allow(dead_code)]
 struct GlobalTxView {
     date: String,
     timestamp: i64,
@@ -171,8 +170,14 @@ struct GlobalTxView {
     explorer_url: String,
 }
 
+#[derive(Template)]
+#[template(path = "global_transactions.html")]
+struct GlobalTransactionsTemplate {
+    rows: Vec<GlobalTxView>,
+    active_nav: String,
+}
+
 impl GlobalTxView {
-    #[allow(dead_code)]
     fn from_solana(
         wallet: &crate::storage::WalletAddress,
         tx: &crate::chains::solana::SolanaTransaction,
@@ -212,7 +217,6 @@ impl GlobalTxView {
 
     // The Mercury transaction type is exported as `Transaction`, not
     // `MercuryTransaction`. Verified against src/banking/mercury.rs:20.
-    #[allow(dead_code)]
     fn from_mercury(
         account: &crate::storage::BankingAccount,
         tx: &crate::banking::mercury::Transaction,
@@ -2049,9 +2053,72 @@ async fn update_refresh_interval(
     axum::response::Redirect::to("/settings").into_response()
 }
 
-/// Stub for the global transactions page - real implementation in Task 7.
+/// Global transactions page - aggregates recent activity from Solana wallets
+/// and Mercury accounts. Failed RPC calls and missing API keys are silently
+/// skipped (per spec). Results sorted newest-first, truncated to 100 rows.
 async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    Html("<p>Coming soon</p>".to_string())
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(_) => AddressBook::new(),
+    };
+    let mut rows: Vec<GlobalTxView> = Vec::new();
+
+    // Solana wallets - SolanaClient::get_transactions is synchronous and uses
+    // std::thread::sleep internally, so wrap each fetch in spawn_blocking to
+    // avoid stalling the Tokio runtime.
+    for wallet in book.addresses.iter().filter(|w| w.chain == Chain::Solana) {
+        let wallet = wallet.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let client = SolanaClient::new(None);
+            client
+                .get_transactions(&wallet.address, 25)
+                .ok()
+                .map(|t| (wallet, t))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((wallet, txs)) = result {
+            for tx in &txs {
+                rows.push(GlobalTxView::from_solana(&wallet, tx));
+            }
+        }
+    }
+
+    // Mercury accounts - async client
+    for account in book
+        .banking_accounts
+        .iter()
+        .filter(|a| a.service == BankingService::Mercury)
+    {
+        let client = match MercuryClient::new() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        match client
+            .get_transactions(&account.account_id, None, None)
+            .await
+        {
+            Ok(txs) => {
+                for tx in txs.iter().take(50) {
+                    rows.push(GlobalTxView::from_mercury(account, tx));
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    rows.truncate(100);
+
+    Html(
+        GlobalTransactionsTemplate {
+            rows,
+            active_nav: "transactions".to_string(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
 }
 
 /// API endpoint to list all tracked wallet addresses with metadata.
