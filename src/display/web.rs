@@ -158,6 +158,97 @@ struct TransactionView {
     counterparty: String,
 }
 
+#[allow(dead_code)]
+struct GlobalTxView {
+    date: String,
+    timestamp: i64,
+    source_name: String,
+    source_chain: String,
+    description: String,
+    amount: f64,
+    currency: String,
+    status: String,
+    explorer_url: String,
+}
+
+impl GlobalTxView {
+    #[allow(dead_code)]
+    fn from_solana(
+        wallet: &crate::storage::WalletAddress,
+        tx: &crate::chains::solana::SolanaTransaction,
+    ) -> Self {
+        // Verified against src/chains/solana.rs:55-62 - the timestamp field is
+        // named `timestamp` (Option<i64>), NOT `block_time`.
+        let date = match tx.timestamp {
+            Some(ts) => chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            None => "pending".to_string(),
+        };
+
+        Self {
+            date,
+            timestamp: tx.timestamp.unwrap_or(0),
+            source_name: wallet.name.clone(),
+            source_chain: "Solana".to_string(),
+            description: tx.memo.clone().unwrap_or_else(|| {
+                let sig = &tx.signature;
+                if sig.len() > 12 {
+                    format!("{}…{}", &sig[..6], &sig[sig.len() - 6..])
+                } else {
+                    sig.clone()
+                }
+            }),
+            amount: tx.sol_change,
+            currency: "SOL".to_string(),
+            status: if tx.success {
+                "Confirmed".to_string()
+            } else {
+                "Failed".to_string()
+            },
+            explorer_url: format!("https://solscan.io/tx/{}", tx.signature),
+        }
+    }
+
+    // The Mercury transaction type is exported as `Transaction`, not
+    // `MercuryTransaction`. Verified against src/banking/mercury.rs:20.
+    #[allow(dead_code)]
+    fn from_mercury(
+        account: &crate::storage::BankingAccount,
+        tx: &crate::banking::mercury::Transaction,
+    ) -> Self {
+        let timestamp_str = tx.posted_at.as_ref().unwrap_or(&tx.created_at);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0);
+        let date = if timestamp_str.len() >= 16 {
+            timestamp_str[..16].replace('T', " ")
+        } else {
+            timestamp_str.clone()
+        };
+
+        let description = tx
+            .bank_description
+            .clone()
+            .or(tx.note.clone())
+            .or(tx.external_memo.clone())
+            .or_else(|| tx.counterparty_name.clone())
+            .unwrap_or_else(|| tx.kind.clone());
+
+        Self {
+            date,
+            timestamp,
+            source_name: account.name.clone(),
+            source_chain: "Mercury".to_string(),
+            description,
+            amount: tx.amount,
+            currency: "USD".to_string(),
+            status: tx.status.clone(),
+            explorer_url: String::new(),
+        }
+    }
+}
+
 struct WalletView {
     name: String,
     #[allow(dead_code)]
@@ -3651,5 +3742,29 @@ mod tests {
         let response = update_refresh_interval(State(state), form).await;
         let (parts, _body) = response.into_response().into_parts();
         assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_global_tx_view_sort_and_truncate() {
+        let mut rows: Vec<GlobalTxView> = (0..150)
+            .map(|i| GlobalTxView {
+                date: "2026-05-13".to_string(),
+                timestamp: i as i64,
+                source_name: "test".to_string(),
+                source_chain: "Solana".to_string(),
+                description: "".to_string(),
+                amount: 0.0,
+                currency: "SOL".to_string(),
+                status: "Confirmed".to_string(),
+                explorer_url: "".to_string(),
+            })
+            .collect();
+
+        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        rows.truncate(100);
+
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].timestamp, 149);
+        assert_eq!(rows[99].timestamp, 50);
     }
 }
