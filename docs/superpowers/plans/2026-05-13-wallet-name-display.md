@@ -430,6 +430,22 @@ git commit -m "feat: thread wallet_name through aggregate helpers"
 
 This is the biggest change. The current handler does its own inline aggregation per chain. We replace that aggregation with calls to the now-`pub(crate)` aggregate helpers, while preserving the cache-update side-effects.
 
+**Critical flow constraint:** The existing handler fetches prices **after** chain queries (line 2219-2237) and back-fills USD values onto the inline accumulator. The shared `aggregate_*_balances` helpers, in contrast, read USD values from `balances.<chain>_usd_value` / `token.usd_value` fields. Those fields are populated by `balances.enrich_from_cache(&prices)`. So the refactored handler must follow this order:
+
+1. Per-wallet chain query → push the resulting `balances` onto a per-chain `Vec` (along with the wallet) **and** update the cache (cache update can happen now because the cache stores raw amounts plus its own usd_value calculation from the chain client).
+2. Collect all symbols seen across all wallets into `all_symbols`.
+3. Fetch prices for `all_symbols` and write them to `state.cache`.
+4. For each buffered `(wallet, balances)` pair: call `balances.enrich_from_cache(&prices)`, then call `aggregate_<chain>_balances(&mut portfolio, company, &wallet.name, &balances)`.
+5. Build the template data from `portfolio`.
+
+This two-pass shape is the same one `enrich_and_display_balances` in `query.rs:354` uses.
+
+**Circle currency symbol rename:** The existing inline code (web.rs:2183-2187) renames `"USD" → "USDC"` and `"EUR" → "EURC"` for Circle balances on the web path. The shared `aggregate_circle_balances` uses raw currency symbols. After this refactor, the web balances page will display the raw currency (matching the terminal display). This is a deliberate normalization — accept it. Cache updates for Circle keep their existing renamed `CachedToken.symbol` strings so the per-wallet detail rendering on the dashboard is unchanged.
+
+**Sort order:** Existing handler sorts companies alphabetically (line 2247). The spec calls for descending USD value. Switch to USD-desc as part of the refactor.
+
+**Preserved literals:** The cache update for Mercury sets `chain_or_service: "Mercury Banking".to_string()`; for Circle it sets `chain_or_service: "Circle".to_string()`. Copy these verbatim into the new branches — do not substitute `account.service.display_name()`.
+
 - [ ] **Step 1: Update `BalancesTemplate` and helper view structs**
 
 In `src/display/web.rs`, replace the `BalancesTemplate` definition at lines 100-106 and add a new `WalletGroup` struct. Final state:
@@ -462,36 +478,58 @@ use crate::query::{
     aggregate_aptos_balances, aggregate_sui_balances, aggregate_starknet_balances,
     aggregate_mercury_balances, aggregate_circle_balances,
 };
-use crate::types::PortfolioSummary;
+use crate::types::{PortfolioSummary, CompanyAssets, WalletAssets, PriceEnrichable};
 ```
+
+`PriceEnrichable` is needed so `enrich_from_cache` is callable on each chain's `AccountBalances`.
 
 - [ ] **Step 3: Replace the `query_balances` handler body**
 
-Replace `query_balances` at `src/display/web.rs:1900-2277` with the following. Two structural changes from current:
+Replace `query_balances` at `src/display/web.rs:1900-2277`. The new handler has three phases:
 
-1. The local `portfolio: HashMap<String, HashMap<String, (f64, f64)>>` (line 1929) is replaced by a `PortfolioSummary`.
-2. Each per-chain branch keeps its cache-update logic (the `CachedBalance { ... }` block and `state.cache.update_balance(...)` call), but replaces its inline accumulation with a call to the shared `aggregate_*_balances` helper.
+**Phase A: Per-wallet chain query loop.** For each wallet/account, do the RPC call. On success: push `(company, name, balances)` onto a per-chain buffer, insert all observed symbols into `all_symbols` (still needed — drives price fetching), and update the cache verbatim from the existing code (cache update logic does not change, including the Circle `USD → USDC` / `EUR → EURC` rename for `CachedToken.symbol` and the literal `"Mercury Banking"` / `"Circle"` strings for `chain_or_service`).
 
-For the **company string**, preserve the existing `is_empty() → "Uncategorized"` behavior by computing the substituted value once per wallet/account at the top of each branch.
+**Phase B: Price fetch + cache write.** After the loop, call `PriceService::new()` and `batch_fetch_prices(&all_symbols)`, then `state.cache.update_prices(prices)`. Same as today (lines 2219-2237).
 
-Concrete rewrite for each branch (Solana shown — apply the same shape to Near, Aptos, Sui, Starknet, EVM, Mercury, Circle):
+**Phase C: Enrich + aggregate.** Iterate each buffered `(company, name, balances)`, call `balances.enrich_from_cache(&prices)`, then call the corresponding `aggregate_<chain>_balances(&mut portfolio, &company, &name, &balances)`. Banking accounts (Mercury, Circle) skip the `enrich_from_cache` step because their `AccountBalances` don't implement `PriceEnrichable` (they store USD directly).
+
+**Phase D: Build template data** from `portfolio.companies`.
+
+Concrete code for **Phase A** (Solana branch shown — repeat the same shape for Near/Aptos/Sui/Starknet/EVM/Mercury/Circle, preserving the existing per-chain RPC client setup and cache-update logic from the original handler). Note the buffer pushes the wallet metadata needed for Phase C:
+
+```rust
+let mut solana_buffer: Vec<(String, String, solana::AccountBalances)> = Vec::new();
+let mut evm_buffer: Vec<(String, String, evm::AccountBalances, Chain)> = Vec::new();
+let mut near_buffer: Vec<(String, String, near::AccountBalances)> = Vec::new();
+let mut aptos_buffer: Vec<(String, String, aptos::AccountBalances)> = Vec::new();
+let mut sui_buffer: Vec<(String, String, sui::AccountBalances)> = Vec::new();
+let mut starknet_buffer: Vec<(String, String, starknet::AccountBalances)> = Vec::new();
+let mut mercury_buffer: Vec<(String, String, mercury::AccountBalances)> = Vec::new();
+let mut circle_buffer: Vec<(String, String, circle::AccountBalances)> = Vec::new();
+let mut all_symbols: HashSet<String> = HashSet::new();
+let mut portfolio = PortfolioSummary {
+    companies: HashMap::new(),
+    total_usd_value: 0.0,
+};
+```
+
+Per-branch (Solana example):
 
 ```rust
 Chain::Solana => {
     let client = SolanaClient::new(None);
     if let Ok(balances) = client.get_balances(&wallet.address) {
         let company = if wallet.company.is_empty() {
-            "Uncategorized"
+            "Uncategorized".to_string()
         } else {
-            wallet.company.as_str()
+            wallet.company.clone()
         };
 
-        aggregate_solana_balances(&mut portfolio, company, &wallet.name, &balances);
-
-        // Cache update (unchanged behavior)
+        all_symbols.insert("SOL".to_string());
         let mut cached_tokens = vec![];
         for token in &balances.token_balances {
             if let Some(symbol) = &token.symbol {
+                all_symbols.insert(symbol.clone());
                 cached_tokens.push(CachedToken {
                     symbol: symbol.clone(),
                     balance: token.ui_amount,
@@ -510,17 +548,64 @@ Chain::Solana => {
             total_usd_value: balances.total_usd_value,
         };
         let _ = state.cache.update_balance(&wallet.name, cached_balance).await;
+
+        solana_buffer.push((company, wallet.name.clone(), balances));
     }
 }
 ```
 
-Notes:
-- `all_symbols: HashSet<String>` was used in the old code to track which symbols were seen for later price fetch. Inspect whether it is still needed downstream in `query_balances`; if it was only used for inline accumulation, remove it. Otherwise, leave the `all_symbols.insert(...)` calls in place inside each branch.
-- For EVM, the native symbol comes from `balances.native_symbol` (not a hardcoded "ETH"). The helper handles this — but the cache update's `native_symbol` field must also reflect this.
-- For Mercury: the existing branch reads `balances.current_balance`; keep that unchanged in the cache update and let `aggregate_mercury_balances` handle the portfolio side.
-- For Circle: the existing branch iterates `balances.available_balances`; keep that unchanged for cache, and let `aggregate_circle_balances` handle the portfolio side.
+For EVM, the buffer entry stores the `wallet.chain` so Phase C can pass it to `aggregate_evm_balances`. For Mercury, copy the literal `chain_or_service: "Mercury Banking".to_string()`. For Circle, copy the literal `chain_or_service: "Circle".to_string()` and keep the `match balance.currency.as_str() { "USD" => "USDC", "EUR" => "EURC", _ => &balance.currency }` rename **only inside the `CachedToken.symbol` assignment** — not for `all_symbols` (which still inserts the raw `balance.currency`).
 
-After the per-wallet / per-account loops, build the template data from `portfolio`:
+**Phase B** (after the loop):
+
+```rust
+let mut prices: HashMap<String, f64> = HashMap::new();
+if let Ok(mut price_service) = PriceService::new() {
+    let symbols: Vec<String> = all_symbols.into_iter().collect();
+    if let Ok(fetched) = price_service.batch_fetch_prices(&symbols).await {
+        prices = fetched;
+        let _ = state.cache.update_prices(prices.clone()).await;
+    }
+}
+let _ = state.cache.mark_refresh().await;
+```
+
+**Phase C**:
+
+```rust
+for (company, name, mut balances) in solana_buffer {
+    balances.enrich_from_cache(&prices);
+    aggregate_solana_balances(&mut portfolio, &company, &name, &balances);
+}
+for (company, name, mut balances, chain) in evm_buffer {
+    balances.enrich_from_cache(&prices);
+    aggregate_evm_balances(&mut portfolio, &company, &name, &balances, &chain);
+}
+for (company, name, mut balances) in near_buffer {
+    balances.enrich_from_cache(&prices);
+    aggregate_near_balances(&mut portfolio, &company, &name, &balances);
+}
+for (company, name, mut balances) in aptos_buffer {
+    balances.enrich_from_cache(&prices);
+    aggregate_aptos_balances(&mut portfolio, &company, &name, &balances);
+}
+for (company, name, mut balances) in sui_buffer {
+    balances.enrich_from_cache(&prices);
+    aggregate_sui_balances(&mut portfolio, &company, &name, &balances);
+}
+for (company, name, mut balances) in starknet_buffer {
+    balances.enrich_from_cache(&prices);
+    aggregate_starknet_balances(&mut portfolio, &company, &name, &balances);
+}
+for (company, name, balances) in mercury_buffer {
+    aggregate_mercury_balances(&mut portfolio, &company, &name, &balances);
+}
+for (company, name, balances) in circle_buffer {
+    aggregate_circle_balances(&mut portfolio, &company, &name, &balances);
+}
+```
+
+**Phase D — build template data from `portfolio`:**
 
 ```rust
 // Build template data from PortfolioSummary
@@ -603,7 +688,12 @@ git commit -m "refactor: route query_balances through shared aggregation"
 
 - [ ] **Step 1: Replace the table body with company → wallet → asset structure**
 
-Replace the `<tbody>...</tbody>` and surrounding `<table>` in `templates/balances.html` (lines 22-56) with a sectioned layout. Final balances rendering:
+**Important scope:** Replace **only** the `<table>...</table>` element at `templates/balances.html:22-56`. Leave intact:
+- The error branch (lines 3-9).
+- The empty-companies branch `{% if companies.is_empty() %}...{% else %}` wrapper (lines 12-19).
+- The `<div class="balances-footer">` portfolio-total footer (lines 58-64) and its surrounding `{% else %}{% endif %}` scaffolding.
+
+Replace the `<table>` element with a sectioned layout. Final balances rendering (drops into the place of the old `<table>`):
 
 ```html
 {% for (company, wallets) in companies %}
@@ -737,7 +827,15 @@ git commit -m "feat: render balances grouped by company and wallet"
 **Files:**
 - Modify: `templates/index.html:121-168` (wallet/account row rendering)
 
-- [ ] **Step 1: Add a title attribute and a CSS rule**
+- [ ] **Step 1: Locate the existing `.asset-symbol` rule**
+
+```bash
+grep -rn "\.asset-symbol\s*{" templates/
+```
+
+Expected: one or more matches. Note the file(s).
+
+- [ ] **Step 2: Add a title attribute and a CSS rule**
 
 In `templates/index.html` at line 130, change the address div to include a `title` attribute:
 
@@ -751,7 +849,7 @@ And at line 178 (banking account):
 <div class="asset-symbol truncate" title="{{ account.account_id }}">{{ account.account_id }}</div>
 ```
 
-Then in the page's `<style>` block (at the bottom of `templates/index.html`, or in `templates/base.html`'s shared CSS — pick the first that already defines `.asset-symbol`), add a scoped rule:
+Then add (or tighten) a scoped rule. If Step 1 found an existing `.asset-symbol` definition with `max-width`, change that `max-width` to `120px`. Otherwise, add a new rule in the file where the existing definition lives (or in `templates/index.html`'s `<style>` block if no shared definition exists):
 
 ```css
 .asset-info .asset-symbol {
@@ -762,9 +860,7 @@ Then in the page's `<style>` block (at the bottom of `templates/index.html`, or 
 }
 ```
 
-If the existing `.asset-symbol` style already sets `max-width`, just tighten the value to `120px`.
-
-- [ ] **Step 2: Manual smoke test**
+- [ ] **Step 3: Manual smoke test**
 
 ```bash
 cargo build --release && ./target/release/gringotts serve --port 3000
@@ -777,7 +873,7 @@ In a browser, confirm:
 
 Adjust `max-width` between 96px and 160px if the truncation looks too aggressive or too loose.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add templates/index.html
