@@ -19,41 +19,45 @@
 </div>
 {% else %}
 
-<table class="data-table">
-    <thead>
-        <tr>
-            <th>Asset</th>
-            <th>Company</th>
-            <th style="text-align: right;">Balance</th>
-            <th style="text-align: right;">Value</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for (company, assets) in companies %}
-        {% for asset in assets %}
-        <tr>
-            <td>
-                <div class="asset-info">
-                    <div class="asset-icon">{{ asset.symbol.chars().next().unwrap_or('?') }}</div>
-                    <div>
-                        <div class="asset-name">{{ asset.symbol }}</div>
-                    </div>
-                </div>
-            </td>
-            <td>{{ company }}</td>
-            <td class="amount">{{ asset.amount|format_amount }}</td>
-            <td class="amount positive">
-                {% if asset.usd_value > 0.0 %}
-                ${{ asset.usd_value|format_usd }}
-                {% else %}
-                --
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-        {% endfor %}
-    </tbody>
-</table>
+{% for (company, wallets) in companies %}
+<div class="company-section">
+    <div class="company-header">
+        <span class="company-name">{{ company }}</span>
+    </div>
+
+    {% for wallet in wallets %}
+    <div class="wallet-section">
+        <div class="wallet-header">
+            <span class="wallet-name">{{ wallet.name }}</span>
+            <span class="wallet-total amount positive">${{ wallet.total_usd|format_usd }}</span>
+        </div>
+
+        <table class="data-table wallet-assets">
+            <tbody>
+                {% for asset in wallet.assets %}
+                <tr>
+                    <td>
+                        <div class="asset-info">
+                            <div class="asset-icon">{{ asset.symbol.chars().next().unwrap_or('?') }}</div>
+                            <div class="asset-name">{{ asset.symbol }}</div>
+                        </div>
+                    </td>
+                    <td class="amount">{{ asset.amount|format_amount }}</td>
+                    <td class="amount positive">
+                        {% if asset.usd_value > 0.0 %}
+                        ${{ asset.usd_value|format_usd }}
+                        {% else %}
+                        --
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
 
 <div class="balances-footer">
     <div class="portfolio-total">
@@ -100,6 +104,52 @@
     .timestamp {
         font-size: 12px;
         color: var(--text-disabled);
+    }
+
+    .company-section {
+        margin-bottom: 24px;
+    }
+
+    .company-header {
+        padding: 12px 20px;
+        background: var(--bg-elevated);
+        border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .company-name {
+        font-size: 14px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-disabled);
+    }
+
+    .wallet-section {
+        margin-left: 16px;
+        border-left: 2px solid var(--border-subtle);
+        padding-left: 12px;
+        margin-bottom: 16px;
+    }
+
+    .wallet-header {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 12px;
+        background: var(--bg-surface);
+    }
+
+    .wallet-name {
+        font-weight: 500;
+        font-size: 13px;
+    }
+
+    .wallet-total {
+        font-family: var(--font-mono);
+        font-weight: 500;
+    }
+
+    .wallet-assets {
+        width: 100%;
     }
 </style>
 
