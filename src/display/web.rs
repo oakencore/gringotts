@@ -305,6 +305,16 @@ fn resolve_refresh_interval(cli_interval: Option<String>) -> anyhow::Result<Dura
     Ok(Duration::from_secs(DEFAULT_REFRESH_INTERVAL_SECS))
 }
 
+/// Maps the optional `filter` query string value to canonical
+/// (filter_label, active_nav_label) strings.
+fn resolve_dashboard_filter(input: Option<&str>) -> (&'static str, &'static str) {
+    match input {
+        Some("wallets") => ("wallets", "wallets"),
+        Some("banking") => ("banking", "banking"),
+        _ => ("all", "dashboard"),
+    }
+}
+
 /// Format a duration for display
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -1958,11 +1968,9 @@ async fn index(
     let bank_count = book.banking_accounts.len();
 
     // Map filter query param to canonical strings
-    let (filter, active_nav) = match q.filter.as_deref() {
-        Some("wallets") => ("wallets".to_string(), "wallets".to_string()),
-        Some("banking") => ("banking".to_string(), "banking".to_string()),
-        _ => ("all".to_string(), "dashboard".to_string()),
-    };
+    let (filter, active_nav) = resolve_dashboard_filter(q.filter.as_deref());
+    let filter = filter.to_string();
+    let active_nav = active_nav.to_string();
 
     // Group by company
     let mut company_map: HashMap<String, (Vec<WalletView>, Vec<BankingView>)> = HashMap::new();
@@ -3430,23 +3438,20 @@ mod tests {
     }
 
     #[test]
-    fn test_index_template_filter_routing() {
-        // The mapping from filter query string to (filter, active_nav)
-        // is small enough to test directly without spinning up a handler.
-        let cases: [(Option<&str>, (&str, &str)); 4] = [
-            (None, ("all", "dashboard")),
-            (Some("wallets"), ("wallets", "wallets")),
-            (Some("banking"), ("banking", "banking")),
-            (Some("garbage"), ("all", "dashboard")),
-        ];
-        for (input, (want_filter, want_nav)) in cases {
-            let (got_filter, got_nav) = match input {
-                Some("wallets") => ("wallets", "wallets"),
-                Some("banking") => ("banking", "banking"),
-                _ => ("all", "dashboard"),
-            };
-            assert_eq!(got_filter, want_filter, "filter for input {:?}", input);
-            assert_eq!(got_nav, want_nav, "active_nav for input {:?}", input);
-        }
+    fn test_resolve_dashboard_filter() {
+        assert_eq!(resolve_dashboard_filter(None), ("all", "dashboard"));
+        assert_eq!(
+            resolve_dashboard_filter(Some("wallets")),
+            ("wallets", "wallets")
+        );
+        assert_eq!(
+            resolve_dashboard_filter(Some("banking")),
+            ("banking", "banking")
+        );
+        assert_eq!(
+            resolve_dashboard_filter(Some("garbage")),
+            ("all", "dashboard")
+        );
+        assert_eq!(resolve_dashboard_filter(Some("")), ("all", "dashboard"));
     }
 }
