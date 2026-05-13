@@ -31,7 +31,9 @@ Wire every sidebar item to a real page or filtered view, with the smallest reaso
 
 Replace the dead `#wallets` and `#banking` hrefs with `?filter=wallets` and `?filter=banking` query params on the existing dashboard route.
 
-**Backend** (`src/display/web.rs::index_handler`):
+**Backend** (`src/display/web.rs:1933` — the existing `index` handler):
+
+The current handler has signature `async fn index() -> impl IntoResponse` (no extractors). It gains two extractors: `State` for cache reads (if Settings UI needs them later) and `Query` for the new filter param. Axum will wire both automatically since `.with_state(state.clone())` is already applied to the router.
 
 ```rust
 #[derive(Deserialize)]
@@ -39,23 +41,23 @@ struct DashboardFilter {
     filter: Option<String>,  // "wallets" | "banking" | None
 }
 
-async fn index_handler(
+async fn index(
     State(_state): State<Arc<AppState>>,
     Query(q): Query<DashboardFilter>,
 ) -> impl IntoResponse {
-    // existing handler logic, passing q.filter into the template
+    // existing handler logic, plus computing `filter`, `active_nav`,
+    // and predicate flags for the empty-state.
 }
 ```
 
-`IndexTemplate` gains a `filter: String` field (one of `"all"`, `"wallets"`, `"banking"`). The handler maps `q.filter.as_deref()` to that.
+`IndexTemplate` gains three new fields: `filter: String` (one of `"all"`, `"wallets"`, `"banking"`), `active_nav: String` (see Section 4), and `has_visible_rows: bool` (true if any row in the filtered view will render). The handler maps `q.filter.as_deref()` to `filter` and computes `has_visible_rows` by walking `companies` and checking the relevant inner collection.
 
 **Frontend** (`templates/index.html`):
 - Wrap the existing inner loops with conditionals so the table reflects the filter:
   - `{% if filter != "banking" %}{% for wallet in company.wallets %}...{% endif %}`
   - `{% if filter != "wallets" %}{% for account in company.banking_accounts %}...{% endif %}`
 - Update the page subtitle to reflect the active filter ("Wallets" / "Banking accounts" / "All accounts").
-- Use the filter to set `active_nav` (see Section 4) so the correct sidebar item highlights.
-- Empty state: reuse the existing empty-state block but with filter-aware copy ("No banking accounts tracked yet").
+- **Empty-state predicate:** The existing empty state checks `companies.is_empty()`. That doesn't catch the case where `filter=banking` is applied but only crypto wallets exist (companies isn't empty; banking rows just aren't rendered). Use the new `has_visible_rows` field instead: show the empty state when `!has_visible_rows`. Copy varies by filter: "No wallets tracked yet" / "No banking accounts tracked yet" / "No accounts tracked yet".
 
 ### Section 2 — Settings page
 
@@ -89,8 +91,8 @@ Environment
 
 **Editable controls:**
 
-1. **Refresh interval** — text input accepting duration strings (e.g., `4h`, `30m`, `1d`) parsed by the existing `parse_duration` helper at `src/display/web.rs:250`. Posts a form to `/settings/refresh-interval` which updates `AppState.refresh_interval_secs`. The change takes effect at the next tick of the background refresh task (see implementation note below).
-2. **Force refresh now** — HTMX-POSTs to the existing `/api/refresh` endpoint (`web.rs:445`), which already implements the 30-second cooldown.
+1. **Refresh interval** — text input accepting duration strings (e.g., `4h`, `30m`, `1d`) parsed by the existing `parse_duration` helper at `src/display/web.rs:248`. Posts a form to `/settings/refresh-interval` which updates `AppState.refresh_interval_secs`. The change takes effect at the next tick of the background refresh task (see implementation note below).
+2. **Force refresh now** — HTMX-POSTs to the existing `/api/refresh` endpoint (handler `manual_refresh` at `web.rs:897`, route registered around `web.rs:387`), which already implements the 30-second cooldown.
 
 **Read-only displays:**
 - Port (passed from CLI args / config via `AppState`).
@@ -101,12 +103,33 @@ Environment
 
 **State plumbing:**
 
-`AppState.refresh_interval_secs: u64` becomes `Arc<RwLock<u64>>` so the POST handler can write to it. Read sites are few. The `background_refresh_task` (`src/display/web.rs:435`) creates a `tokio::time::interval` from this value at startup; changing the value mid-flight doesn't automatically reset the ticker. Two acceptable implementations:
+`AppState.refresh_interval_secs: u64` becomes `Arc<RwLock<u64>>` so the POST handler can write to it. Existing read sites that must be updated:
 
-- **Simple:** the task reads the value on each tick and recomputes its sleep duration manually instead of using a fixed `interval`. Add a `mark` time and `sleep_until(mark + dynamic_interval)`.
-- **Adequate:** keep the fixed `tokio::time::interval`, document in the UI that the change takes effect after the next refresh fires.
+- `health_check` at `web.rs:1795` and `web.rs:1801` (both reads, async context, so `.read().await` is fine).
+- The signature of `background_refresh_task` at `web.rs:466` currently accepts `interval: Duration` as a separate argument (computed at startup, passed by value). That argument becomes redundant once the task reads from state. The signature changes to drop `interval`, and the task pulls `state.refresh_interval_secs.read().await` at the top of each loop iteration.
+- Three test sites at `web.rs:3309`, `web.rs:3336`, `web.rs:3383` that construct `AppState` literally; they need to wrap the value in `Arc::new(RwLock::new(...))`.
 
-Implementation will pick one when the plan is written. For this spec, both are acceptable.
+**Background task ticker behavior** (`background_refresh_task` at `web.rs:466`):
+
+Decision: option **Simple** — the task reads the current interval on each loop iteration and uses `tokio::time::sleep_until(mark + Duration::from_secs(*interval))` instead of a fixed `tokio::time::interval` ticker. This is necessary because option "Adequate" (document the lag) is unhelpful in practice: a user changing the interval from `4h` to `30m` would wait up to 4 hours for the change to take effect, which is the opposite of what they pressed Save for. Option Simple makes the change take effect on the next tick (at most one current-period wait), which is what users expect.
+
+Sketch:
+
+```rust
+async fn background_refresh_task(state: Arc<AppState>) {
+    // Skip the first immediate tick: don't refresh at startup
+    let initial = *state.refresh_interval_secs.read().await;
+    tokio::time::sleep(Duration::from_secs(initial)).await;
+
+    loop {
+        if let Err(e) = refresh_all_balances(&state).await {
+            eprintln!("[{}] Background refresh failed: {}", ts(), e);
+        }
+        let next = *state.refresh_interval_secs.read().await;
+        tokio::time::sleep(Duration::from_secs(next)).await;
+    }
+}
+```
 
 ### Section 3 — Transactions global view
 
@@ -114,23 +137,40 @@ Implementation will pick one when the plan is written. For this spec, both are a
 
 **Aggregation logic:**
 
+`SolanaClient::get_transactions` is **synchronous** and uses `std::thread::sleep(Duration::from_millis(100))` internally. Calling it from an `async fn` directly will block the Tokio worker thread for the whole `N × 2s` worst-case duration and starve other handlers. The Solana fetch must be wrapped in `tokio::task::spawn_blocking`.
+
 ```rust
-async fn get_global_transactions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let book = AddressBook::load()?;
+async fn get_global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(_) => AddressBook::new(),
+    };
     let mut rows: Vec<GlobalTxView> = Vec::new();
 
-    // Solana wallets: 25 txns per wallet
-    for wallet in book.addresses.iter().filter(|w| matches!(w.chain, Chain::Solana)) {
-        let client = SolanaClient::new(None);
-        if let Ok(txs) = client.get_transactions(&wallet.address, 25) {
+    // Solana wallets: 25 txns per wallet, fetched on a blocking thread pool
+    for wallet in book.addresses.iter().filter(|w| w.chain == Chain::Solana) {
+        let address = wallet.address.clone();
+        let wallet_for_view = wallet.clone();
+        let txs = tokio::task::spawn_blocking(move || {
+            let client = SolanaClient::new(None);
+            client.get_transactions(&address, 25).ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(txs) = txs {
             for tx in txs {
-                rows.push(GlobalTxView::from_solana(wallet, tx));
+                rows.push(GlobalTxView::from_solana(&wallet_for_view, tx));
             }
         }
     }
 
-    // Mercury accounts: 50 txns per account
-    for account in book.banking_accounts.iter().filter(|a| a.service == BankingService::Mercury) {
+    // Mercury accounts: 50 txns per account (already async)
+    for account in book
+        .banking_accounts
+        .iter()
+        .filter(|a| a.service == BankingService::Mercury)
+    {
         if let Ok(client) = MercuryClient::new() {
             if let Ok(txs) = client.get_transactions(&account.account_id, None, None).await {
                 for tx in txs.into_iter().take(50) {
@@ -143,7 +183,14 @@ async fn get_global_transactions(State(state): State<Arc<AppState>>) -> impl Int
     rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     rows.truncate(100);
 
-    Html(GlobalTransactionsTemplate { rows, active_nav: "transactions".to_string() }.render().unwrap_or_default())
+    Html(
+        GlobalTransactionsTemplate {
+            rows,
+            active_nav: "transactions".to_string(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
 }
 
 struct GlobalTxView {
@@ -167,7 +214,7 @@ A single table with columns Date / Source / Description / Amount / Status. The S
 
 **Performance caveats:**
 
-`solana::get_transactions` uses 100ms sleeps between detailed RPC calls (`src/chains/solana.rs:289-291`) and fetches up to 20 details per call. With N Solana wallets, the page load is roughly `N × 2s` worst case. Mercury is one HTTPS call per account. This is acceptable for v1 — the page is on-demand from a sidebar click, not background-fetched. If it becomes painful, follow-ups include parallelizing per-wallet fetches via `tokio::join_all`, or caching results server-side with TTL.
+`SolanaClient::get_transactions` uses 100ms sleeps between detailed RPC calls (`src/chains/solana.rs:288-291`) and fetches up to 20 details per call. With N Solana wallets, the page load is roughly `N × 2s` worst case. The `spawn_blocking` wrapping above ensures these blocking sleeps don't starve the Tokio runtime, but the user-perceived latency is still real. Mercury is one HTTPS call per account. Acceptable for v1 — the page is on-demand from a sidebar click, not background-fetched. If it becomes painful, follow-ups include parallelizing per-wallet `spawn_blocking` calls via `tokio::join_all`, or caching results server-side with TTL.
 
 ### Section 4 — Sidebar wiring + active state
 
@@ -195,17 +242,23 @@ Replace placeholder hrefs with real routes and add active-state via a template v
 </nav>
 ```
 
-**`active_nav` plumbing:** Each top-level template struct (`IndexTemplate`, `SettingsTemplate`, `GlobalTransactionsTemplate`) gains an `active_nav: String` field. Five values: `"dashboard"`, `"wallets"`, `"banking"`, `"transactions"`, `"settings"`. The index handler maps `filter=wallets` → `"wallets"`, `filter=banking` → `"banking"`, default → `"dashboard"`. The Askama base template uses the value to render the `.active` class on the matching nav item.
+**`active_nav` plumbing:** Only one template (`templates/index.html`) currently extends `templates/base.html`. The other four (`balances.html`, `single_balance.html`, `transactions.html` (per-wallet detail), `account_row.html`) are HTMX partials returned to `hx-target` swaps, not full page loads, so they don't render the sidebar.
 
-Alternative considered: a base Askama struct with a `nav` field. Rejected for simplicity; five templates with one string field each is acceptable repetition.
+The full-page templates that need `active_nav: String` are: `IndexTemplate` (existing), `SettingsTemplate` (new), `GlobalTransactionsTemplate` (new). The HTMX-partial templates do not.
+
+Five values: `"dashboard"`, `"wallets"`, `"banking"`, `"transactions"`, `"settings"`. The `index` handler maps `filter=wallets` → `"wallets"`, `filter=banking` → `"banking"`, default → `"dashboard"`. The base template uses the value to render the `.active` class on the matching nav item.
+
+**Route registration:** Both new routes (`GET /settings`, `POST /settings/refresh-interval`, `GET /transactions`) go on the `protected_routes` Router at `web.rs:369-388` (alongside `/`, `/balances`, etc.), not `public_routes`, so the API-key middleware applies.
+
+Alternative considered: a base Askama struct with a `nav` field shared via `{% include %}`. Rejected for simplicity; three full-page templates with one string field each is acceptable repetition.
 
 ### Section 5 — Testing
 
 **Unit tests in `src/display/web.rs`:**
 
-1. Dashboard filter: `index_handler` with `filter=wallets` returns a template payload where banking rows are absent and `active_nav == "wallets"`. Same for `banking`. None → `active_nav == "dashboard"`.
-2. Settings POST: parsing of `refresh_interval` form input via `parse_duration` succeeds for `4h`, `30m`, `1d`; rejects garbage with a 400.
-3. Global transactions: with a stubbed `AddressBook` containing a Solana wallet and a Mercury account, the sorted output is in descending timestamp order and capped at 100 rows.
+1. Dashboard filter: build an `IndexTemplate` directly (the handler is async and uses `AddressBook::load` which reads from `~/.gringotts/`; for unit tests, exercise the template-level `filter`/`active_nav`/`has_visible_rows` plumbing rather than the handler end-to-end). Assert: with `filter == "wallets"`, the rendered HTML does not contain `class="landmark"` (the banking icon); with `filter == "banking"`, the rendered HTML does not contain `class="wallet"` (the wallet icon); with `has_visible_rows = false`, the empty-state block renders.
+2. Settings POST: `parse_duration` accepts `"4h"`, `"30m"`, `"1d"` (existing tests cover this — extend or reuse). The new POST handler returns a 400 on parse failure. Cover by calling the handler with a `Form<RefreshIntervalForm>` extractor carrying garbage and asserting the response status.
+3. Global transactions: a unit test that constructs `Vec<GlobalTxView>` directly (bypassing the chain/Mercury fetch) and asserts the sort-and-truncate pipeline: descending `timestamp` order, capped at 100 rows. The fetching path is exercised via manual smoke instead.
 
 **Manual smoke:**
 - Click each sidebar item; verify active-state highlighting and that the page renders.
