@@ -111,7 +111,7 @@ Currently `query_balances` (`web.rs:1900-2277`) duplicates aggregation logic in 
 
 The 8 per-chain query branches in `query_balances` keep their cache-update blocks intact; they swap their inline `portfolio.entry(...)` / `entry.entry(...)` accumulation for a single call to `aggregate_<chain>_balances(&mut portfolio, &wallet.company, &wallet.name, &balances)`. Net diff: roughly -100 lines of inline accumulation, +1 call per branch.
 
-**`BalancesTemplate` shape** (`src/display/web.rs:100-106`):
+**`BalancesTemplate` shape** (`src/display/web.rs:100-106`) — the existing `companies: Vec<(String, Vec<AssetView>)>` is **replaced** (not extended) with:
 
 ```rust
 struct BalancesTemplate {
@@ -153,12 +153,13 @@ Outer loop over `companies`, inner loop over `wallets` (each emits a subheader r
 - Wallet with all-zero balances: omit.
 - Banking accounts: treated identically to crypto wallets via `account.name`.
 - Failed wallet query: continues to be skipped silently (current behavior preserved — chain RPC `Err(_)` does not push into the portfolio).
+- Empty company string: the existing handler maps `wallet.company.is_empty()` to `"Uncategorized"` (`web.rs:1939-1943`). The refactor preserves this — the `&wallet.company` argument passed into each aggregate helper is replaced with the `is_empty()`-substituted value, matching prior behavior.
 
 ### Section 3 — `index.html` dashboard prominence
 
 The wallet name is already rendered at `templates/index.html:129`. Change is purely CSS:
 
-1. **Truncate the address visually.** The address div at line 130 already has `.truncate`. Add a stricter rule scoped to `.asset-info .asset-symbol`: cap to roughly the first 6 and last 4 characters via a head/tail middle-ellipsis pattern (implemented as an Askama filter `truncate_middle` or as CSS using a fixed `max-width` plus `text-overflow: ellipsis`). The exact character counts will be tuned during implementation — start with 6/4 and adjust based on visual feedback in the running app.
+1. **Truncate the address visually via CSS.** The address div at line 130 already has `.truncate`. Add a stricter rule scoped to `.asset-info .asset-symbol`: a fixed `max-width` (starting around 120px) plus `text-overflow: ellipsis` and `overflow: hidden`. CSS-only — no Askama filter — to keep the change contained to the template/stylesheet. The exact `max-width` will be tuned by visual feedback in the running app.
 2. **Add a `title="{{ wallet.address }}"` attribute** on the address div so hovering reveals the full string.
 
 `.asset-name` font size stays as-is — it is already the dominant element; dialing down the address is sufficient.
