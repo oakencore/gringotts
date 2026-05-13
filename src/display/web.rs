@@ -188,6 +188,33 @@ struct AddAccountForm {
     chain: String,
 }
 
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    port: u16,
+    refresh_interval_human: String,
+    #[allow(dead_code)]
+    refresh_interval_secs: u64,
+    last_refresh: String,
+    next_refresh: String,
+    api_key_enabled: bool,
+    cached_wallet_count: usize,
+    cached_price_count: usize,
+    price_cache_age: String,
+    env_vars: Vec<EnvVarStatus>,
+    active_nav: String,
+}
+
+struct EnvVarStatus {
+    name: String,
+    configured: bool,
+}
+
+#[derive(Deserialize)]
+struct RefreshIntervalForm {
+    interval: String,
+}
+
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -389,6 +416,9 @@ pub async fn start_server(
     // Routes that require authentication
     let protected_routes = Router::new()
         .route("/", get(index))
+        .route("/settings", get(settings_page))
+        .route("/settings/refresh-interval", post(update_refresh_interval))
+        .route("/transactions", get(global_transactions))
         .route("/accounts", post(add_account))
         .route("/accounts/:name", delete(remove_account))
         .route("/balances", get(query_balances))
@@ -1834,6 +1864,109 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     });
 
     (StatusCode::OK, axum::Json(status))
+}
+
+/// Settings page - renders runtime config, cache status, and env-var configured/not-configured.
+async fn settings_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cache = state.cache.read().await;
+    let interval_secs = *state.refresh_interval_secs.read().await;
+    let interval = Duration::from_secs(interval_secs);
+
+    // Compute last/next refresh. cache.last_full_refresh is Option<u64>
+    // (Unix seconds), NOT a chrono DateTime - convert via from_timestamp.
+    let (last_refresh_iso, next_refresh) = match cache.last_full_refresh {
+        Some(last_ts) => {
+            let last_iso = chrono::DateTime::from_timestamp(last_ts as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed = now.saturating_sub(last_ts);
+            let next_in = interval_secs.saturating_sub(elapsed);
+            (last_iso, format_duration(Duration::from_secs(next_in)))
+        }
+        None => ("never".to_string(), format_duration(interval)),
+    };
+
+    let cached_wallet_count = cache.balances.len();
+    // cache.prices is CacheEntry<HashMap<...>>, so the actual map lives at .data.
+    let cached_price_count = cache.prices.data.len();
+    let price_cache_age = cache.cache_age_string();
+
+    let env_vars = vec![
+        EnvVarStatus {
+            name: "HELIUS_API_KEY".to_string(),
+            configured: std::env::var("HELIUS_API_KEY").is_ok(),
+        },
+        EnvVarStatus {
+            name: "ALCHEMY_API_KEY".to_string(),
+            configured: std::env::var("ALCHEMY_API_KEY").is_ok(),
+        },
+        EnvVarStatus {
+            name: "SURGE_API_KEY".to_string(),
+            configured: std::env::var("SURGE_API_KEY").is_ok(),
+        },
+        EnvVarStatus {
+            name: "MERCURY_API_KEY".to_string(),
+            configured: std::env::var("MERCURY_API_KEY").is_ok(),
+        },
+        EnvVarStatus {
+            name: "CIRCLE_API_KEY".to_string(),
+            configured: std::env::var("CIRCLE_API_KEY").is_ok(),
+        },
+    ];
+
+    Html(
+        SettingsTemplate {
+            port: state.port,
+            refresh_interval_human: format_duration(interval),
+            refresh_interval_secs: interval_secs,
+            last_refresh: last_refresh_iso,
+            next_refresh,
+            api_key_enabled: state.api_key.is_some(),
+            cached_wallet_count,
+            cached_price_count,
+            price_cache_age,
+            env_vars,
+            active_nav: "settings".to_string(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
+}
+
+/// Update the in-memory refresh interval. Session-only; CLI flag is for persistence.
+async fn update_refresh_interval(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<RefreshIntervalForm>,
+) -> impl IntoResponse {
+    let parsed = match parse_duration(&form.interval) {
+        Ok(d) => d,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("Invalid interval: {}", e)).into_response();
+        }
+    };
+
+    let new_secs = parsed.as_secs();
+    if new_secs < 30 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Interval must be at least 30 seconds".to_string(),
+        )
+            .into_response();
+    }
+
+    *state.refresh_interval_secs.write().await = new_secs;
+
+    // Redirect back to /settings so the browser follows after the plain form POST.
+    axum::response::Redirect::to("/settings").into_response()
+}
+
+/// Stub for the global transactions page - real implementation in Task 7.
+async fn global_transactions(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    Html("<p>Coming soon</p>".to_string())
 }
 
 /// API endpoint to list all tracked wallet addresses with metadata.
@@ -3453,5 +3586,76 @@ mod tests {
             ("all", "dashboard")
         );
         assert_eq!(resolve_dashboard_filter(Some("")), ("all", "dashboard"));
+    }
+
+    #[tokio::test]
+    async fn test_update_refresh_interval_rejects_garbage() {
+        use crate::services::cache::SharedCache;
+        use axum::extract::{Form, State};
+        use axum::response::IntoResponse;
+
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
+        });
+
+        let form = Form(RefreshIntervalForm {
+            interval: "not-a-duration".to_string(),
+        });
+
+        let response = update_refresh_interval(State(state), form).await;
+        let (parts, _body) = response.into_response().into_parts();
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_update_refresh_interval_writes_state() {
+        use crate::services::cache::SharedCache;
+        use axum::extract::{Form, State};
+
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
+        });
+
+        let form = Form(RefreshIntervalForm {
+            interval: "2h".to_string(),
+        });
+
+        let _response = update_refresh_interval(State(state.clone()), form).await;
+        let stored = *state.refresh_interval_secs.read().await;
+        assert_eq!(stored, 7200);
+    }
+
+    #[tokio::test]
+    async fn test_update_refresh_interval_rejects_too_short() {
+        use crate::services::cache::SharedCache;
+        use axum::extract::{Form, State};
+        use axum::response::IntoResponse;
+
+        let state = Arc::new(AppState {
+            cache: SharedCache::new(),
+            api_key: None,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
+            last_manual_refresh: Arc::new(RwLock::new(None)),
+            refresh_in_progress: Arc::new(RwLock::new(false)),
+        });
+
+        let form = Form(RefreshIntervalForm {
+            interval: "5s".to_string(),
+        });
+
+        let response = update_refresh_interval(State(state), form).await;
+        let (parts, _body) = response.into_response().into_parts();
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST);
     }
 }
