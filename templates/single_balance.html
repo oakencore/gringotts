@@ -7,9 +7,14 @@
                 <span class="address-display">{{ address }}</span>
             </div>
         </div>
-        <button class="btn btn-secondary btn-sm" onclick="this.closest('.single-balance-card').remove()">
-            <i data-lucide="x" style="width: 14px; height: 14px;"></i>
-        </button>
+        <div class="single-balance-actions">
+            <button class="btn btn-secondary btn-sm" data-tsv="{{ tsv_export }}" title="Copy as TSV">
+                <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="this.closest('.single-balance-card').remove()">
+                <i data-lucide="x" style="width: 14px; height: 14px;"></i>
+            </button>
+        </div>
     </div>
 
     {% if !error.is_empty() %}
@@ -78,6 +83,11 @@
         align-items: flex-start;
         padding: 16px;
         border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .single-balance-actions {
+        display: flex;
+        gap: 6px;
     }
 
     .balance-info h3 {

@@ -113,6 +113,7 @@ struct CompanyGroup {
 struct BalancesTemplate {
     total_usd: f64,
     companies: Vec<(String, Vec<WalletGroup>)>,
+    tsv_export: String,
     error: String,
 }
 
@@ -142,6 +143,7 @@ struct SingleBalanceTemplate {
     native_usd: f64,
     tokens: Vec<TokenView>,
     total_usd: f64,
+    tsv_export: String,
     error: String,
 }
 
@@ -461,6 +463,101 @@ fn resolve_dashboard_filter(input: Option<&str>) -> (&'static str, &'static str)
         Some("banking") => ("banking", "banking"),
         _ => ("all", "dashboard"),
     }
+}
+
+/// Replace tab, newline, and CR with a single space each so the value
+/// is safe to embed in a TSV cell. Other characters pass through.
+fn escape_tsv(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\t' | '\n' | '\r' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
+/// Build a TSV string from the balances template's `companies` data.
+/// Flattens (company, wallet, asset) into one row per asset. Header
+/// row is always included. USD values <= 0.0 render as an empty cell
+/// so the spreadsheet column stays numeric.
+fn build_balances_tsv(companies: &[(String, Vec<WalletGroup>)]) -> String {
+    let mut tsv = String::from("Company\tWallet\tSymbol\tAmount\tUSD Value\n");
+    for (company, wallets) in companies {
+        let company_clean = escape_tsv(company);
+        for wallet in wallets {
+            let wallet_clean = escape_tsv(&wallet.name);
+            for asset in &wallet.assets {
+                let symbol_clean = escape_tsv(&asset.symbol);
+                let usd_cell = if asset.usd_value > 0.0 {
+                    format!("{:.2}", asset.usd_value)
+                } else {
+                    String::new()
+                };
+                let amount_str = if asset.symbol == "USD" {
+                    format!("{:.2}", asset.amount)
+                } else {
+                    format!("{:.6}", asset.amount)
+                };
+                tsv.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\n",
+                    company_clean, wallet_clean, symbol_clean, amount_str, usd_cell
+                ));
+            }
+        }
+    }
+    tsv
+}
+
+/// Build a TSV string for a single-wallet detail view. Includes the
+/// native balance as the first asset row (skipped if native_balance
+/// == 0.0), followed by each token in `tokens`. Each row carries the
+/// full address so pasted rows are self-contained.
+#[allow(clippy::too_many_arguments)]
+fn build_single_balance_tsv(
+    wallet_name: &str,
+    chain: &str,
+    address: &str,
+    native_symbol: &str,
+    native_balance: f64,
+    native_usd: f64,
+    tokens: &[TokenView],
+) -> String {
+    let mut tsv = String::from("Wallet\tChain\tAddress\tSymbol\tAmount\tUSD Value\n");
+    let wallet_clean = escape_tsv(wallet_name);
+    let chain_clean = escape_tsv(chain);
+    let address_clean = escape_tsv(address);
+
+    let emit_row = |tsv: &mut String, symbol: &str, amount: f64, usd: f64| {
+        let usd_cell = if usd > 0.0 {
+            format!("{:.2}", usd)
+        } else {
+            String::new()
+        };
+        let amount_str = if symbol == "USD" {
+            format!("{:.2}", amount)
+        } else {
+            format!("{:.6}", amount)
+        };
+        tsv.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            wallet_clean,
+            chain_clean,
+            address_clean,
+            escape_tsv(symbol),
+            amount_str,
+            usd_cell
+        ));
+    };
+
+    // Skip the native row when balance is zero. The visible UI shows it for layout
+    // symmetry, but the spreadsheet export benefits from omitting empty rows.
+    if native_balance != 0.0 {
+        emit_row(&mut tsv, native_symbol, native_balance, native_usd);
+    }
+    for token in tokens {
+        emit_row(&mut tsv, &token.symbol, token.balance, token.usd_value);
+    }
+    tsv
 }
 
 /// Format a duration for display
@@ -2468,6 +2565,7 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 BalancesTemplate {
                     total_usd: 0.0,
                     companies: vec![],
+                    tsv_export: String::new(),
                     error: format!("Failed to load accounts: {}", e),
                 }
                 .render()
@@ -2481,6 +2579,7 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
             BalancesTemplate {
                 total_usd: 0.0,
                 companies: vec![],
+                tsv_export: String::new(),
                 error: String::new(),
             }
             .render()
@@ -2958,10 +3057,13 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
         }
     }
 
+    let tsv = build_balances_tsv(&companies_view);
+
     Html(
         BalancesTemplate {
             total_usd: portfolio.total_usd_value,
             companies: companies_view,
+            tsv_export: tsv,
             error: String::new(),
         }
         .render()
@@ -2983,6 +3085,7 @@ async fn query_single_balance(Path(name): Path<String>) -> impl IntoResponse {
                     native_usd: 0.0,
                     tokens: vec![],
                     total_usd: 0.0,
+                    tsv_export: String::new(),
                     error: format!("Failed to load accounts: {}", e),
                 }
                 .render()
@@ -3011,6 +3114,7 @@ async fn query_single_balance(Path(name): Path<String>) -> impl IntoResponse {
             native_usd: 0.0,
             tokens: vec![],
             total_usd: 0.0,
+            tsv_export: String::new(),
             error: format!("Account '{}' not found", name),
         }
         .render()
@@ -3164,6 +3268,15 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let tsv = build_single_balance_tsv(
+        &wallet.name,
+        &chain_name,
+        &wallet.address,
+        &native_symbol,
+        native_balance,
+        native_usd,
+        &tokens,
+    );
     Html(
         SingleBalanceTemplate {
             name: wallet.name.clone(),
@@ -3174,6 +3287,7 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
             native_usd,
             tokens,
             total_usd,
+            tsv_export: tsv,
             error,
         }
         .render()
@@ -3187,21 +3301,33 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
     match &account.service {
         BankingService::Mercury => match MercuryClient::new() {
             Ok(client) => match client.get_account_balance(&account.account_id).await {
-                Ok(balances) => Html(
-                    SingleBalanceTemplate {
-                        name: account.name.clone(),
-                        address: account.account_id.clone(),
-                        chain: service_name,
-                        native_symbol: "USD".to_string(),
-                        native_balance: balances.current_balance,
-                        native_usd: balances.current_balance,
-                        tokens: vec![],
-                        total_usd: balances.current_balance,
-                        error: String::new(),
-                    }
-                    .render()
-                    .unwrap_or_default(),
-                ),
+                Ok(balances) => {
+                    let tsv = build_single_balance_tsv(
+                        &account.name,
+                        &service_name,
+                        &account.account_id,
+                        "USD",
+                        balances.current_balance,
+                        balances.current_balance,
+                        &[],
+                    );
+                    Html(
+                        SingleBalanceTemplate {
+                            name: account.name.clone(),
+                            address: account.account_id.clone(),
+                            chain: service_name,
+                            native_symbol: "USD".to_string(),
+                            native_balance: balances.current_balance,
+                            native_usd: balances.current_balance,
+                            tokens: vec![],
+                            total_usd: balances.current_balance,
+                            tsv_export: tsv,
+                            error: String::new(),
+                        }
+                        .render()
+                        .unwrap_or_default(),
+                    )
+                }
                 Err(e) => Html(
                     SingleBalanceTemplate {
                         name: account.name.clone(),
@@ -3212,6 +3338,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                         native_usd: 0.0,
                         tokens: vec![],
                         total_usd: 0.0,
+                        tsv_export: String::new(),
                         error: format!("Failed to query: {}", e),
                     }
                     .render()
@@ -3228,6 +3355,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                     native_usd: 0.0,
                     tokens: vec![],
                     total_usd: 0.0,
+                    tsv_export: String::new(),
                     error: format!("Failed to initialize client: {}", e),
                 }
                 .render()
@@ -3252,6 +3380,15 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                             usd_value: usd,
                         });
                     }
+                    let tsv = build_single_balance_tsv(
+                        &account.name,
+                        &service_name,
+                        &account.account_id,
+                        "USD",
+                        total,
+                        total,
+                        &tokens,
+                    );
                     Html(
                         SingleBalanceTemplate {
                             name: account.name.clone(),
@@ -3262,6 +3399,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                             native_usd: total,
                             tokens,
                             total_usd: total,
+                            tsv_export: tsv,
                             error: String::new(),
                         }
                         .render()
@@ -3278,6 +3416,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                         native_usd: 0.0,
                         tokens: vec![],
                         total_usd: 0.0,
+                        tsv_export: String::new(),
                         error: format!("Failed to query: {}", e),
                     }
                     .render()
@@ -3294,6 +3433,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                     native_usd: 0.0,
                     tokens: vec![],
                     total_usd: 0.0,
+                    tsv_export: String::new(),
                     error: format!("Failed to initialize client: {}", e),
                 }
                 .render()
@@ -3971,5 +4111,173 @@ mod tests {
         assert_eq!(rows.len(), 100);
         assert_eq!(rows[0].timestamp, 149);
         assert_eq!(rows[99].timestamp, 50);
+    }
+
+    #[test]
+    fn test_escape_tsv_strips_control_chars() {
+        assert_eq!(escape_tsv("foo\tbar\nbaz\rqux"), "foo bar baz qux");
+        assert_eq!(escape_tsv("clean"), "clean");
+        assert_eq!(escape_tsv(""), "");
+        // Adjacent control chars collapse to one space each, not deduplicated
+        assert_eq!(escape_tsv("a\t\tb"), "a  b");
+    }
+
+    #[test]
+    fn test_build_balances_tsv_flattens_company_wallet_asset() {
+        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
+            "Acme".to_string(),
+            vec![
+                WalletGroup {
+                    name: "WalletA".to_string(),
+                    total_usd: 400.0,
+                    assets: vec![
+                        AssetView {
+                            symbol: "SOL".to_string(),
+                            amount: 3.0,
+                            usd_value: 300.0,
+                        },
+                        AssetView {
+                            symbol: "USDC".to_string(),
+                            amount: 100.0,
+                            usd_value: 100.0,
+                        },
+                    ],
+                },
+                WalletGroup {
+                    name: "WalletB".to_string(),
+                    total_usd: 0.0,
+                    assets: vec![AssetView {
+                        symbol: "UNPRICED".to_string(),
+                        amount: 5.5,
+                        usd_value: 0.0,
+                    }],
+                },
+            ],
+        )];
+
+        let tsv = build_balances_tsv(&companies);
+        let lines: Vec<&str> = tsv.lines().collect();
+
+        assert_eq!(lines[0], "Company\tWallet\tSymbol\tAmount\tUSD Value");
+        assert_eq!(lines[1], "Acme\tWalletA\tSOL\t3.000000\t300.00");
+        assert_eq!(lines[2], "Acme\tWalletA\tUSDC\t100.000000\t100.00");
+        // Empty USD cell for value <= 0.0 (two adjacent tabs at end)
+        assert_eq!(lines[3], "Acme\tWalletB\tUNPRICED\t5.500000\t");
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn test_build_balances_tsv_escapes_control_chars_in_strings() {
+        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
+            "Ac\tme".to_string(),
+            vec![WalletGroup {
+                name: "Wal\nletA".to_string(),
+                total_usd: 100.0,
+                assets: vec![AssetView {
+                    symbol: "S\rOL".to_string(),
+                    amount: 1.0,
+                    usd_value: 100.0,
+                }],
+            }],
+        )];
+        let tsv = build_balances_tsv(&companies);
+        let lines: Vec<&str> = tsv.lines().collect();
+        // String cells get control chars replaced with spaces; numeric cells unaffected
+        assert_eq!(lines[1], "Ac me\tWal letA\tS OL\t1.000000\t100.00");
+    }
+
+    #[test]
+    fn test_build_balances_tsv_empty_input_returns_header_only() {
+        let tsv = build_balances_tsv(&[]);
+        assert_eq!(tsv, "Company\tWallet\tSymbol\tAmount\tUSD Value\n");
+    }
+
+    #[test]
+    fn test_build_balances_tsv_usd_uses_two_decimal_precision() {
+        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
+            "Acme".to_string(),
+            vec![WalletGroup {
+                name: "BankA".to_string(),
+                total_usd: 1500.0,
+                assets: vec![AssetView {
+                    symbol: "USD".to_string(),
+                    amount: 1500.0,
+                    usd_value: 1500.0,
+                }],
+            }],
+        )];
+        let tsv = build_balances_tsv(&companies);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines[1], "Acme\tBankA\tUSD\t1500.00\t1500.00");
+    }
+
+    #[test]
+    fn test_build_single_balance_tsv_includes_native_and_tokens() {
+        let tokens = vec![
+            TokenView {
+                symbol: "USDC".to_string(),
+                balance: 100.0,
+                usd_value: 100.0,
+            },
+            TokenView {
+                symbol: "UNPRICED".to_string(),
+                balance: 5.5,
+                usd_value: 0.0,
+            },
+        ];
+        let tsv = build_single_balance_tsv(
+            "WalletA",
+            "Solana",
+            "So11111111111111111111111111111111111111112",
+            "SOL",
+            3.0,
+            300.0,
+            &tokens,
+        );
+        let lines: Vec<&str> = tsv.lines().collect();
+
+        assert_eq!(
+            lines[0],
+            "Wallet\tChain\tAddress\tSymbol\tAmount\tUSD Value"
+        );
+        assert_eq!(
+            lines[1],
+            "WalletA\tSolana\tSo11111111111111111111111111111111111111112\tSOL\t3.000000\t300.00"
+        );
+        assert_eq!(
+            lines[2],
+            "WalletA\tSolana\tSo11111111111111111111111111111111111111112\tUSDC\t100.000000\t100.00"
+        );
+        // Empty USD cell for unpriced token
+        assert_eq!(
+            lines[3],
+            "WalletA\tSolana\tSo11111111111111111111111111111111111111112\tUNPRICED\t5.500000\t"
+        );
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn test_build_single_balance_tsv_native_only_no_tokens() {
+        let tsv =
+            build_single_balance_tsv("BankA", "Mercury", "acc_123", "USD", 1500.0, 1500.0, &[]);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "BankA\tMercury\tacc_123\tUSD\t1500.00\t1500.00");
+    }
+
+    #[test]
+    fn test_build_single_balance_tsv_zero_native_omits_native_row() {
+        // If the wallet has no native balance (e.g., zeroed-out), skip the native row.
+        // We still want the header and any token rows.
+        let tokens = vec![TokenView {
+            symbol: "USDC".to_string(),
+            balance: 100.0,
+            usd_value: 100.0,
+        }];
+        let tsv = build_single_balance_tsv("WalletA", "Solana", "addr", "SOL", 0.0, 0.0, &tokens);
+        let lines: Vec<&str> = tsv.lines().collect();
+        // Header + 1 token row only (native row omitted because amount is 0)
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "WalletA\tSolana\taddr\tUSDC\t100.000000\t100.00");
     }
 }

@@ -372,14 +372,7 @@ mod tests {
         };
 
         add_asset_to_portfolio(&mut portfolio, "TestCo", "WalletA", "SOL", 3.0, Some(300.0));
-        add_asset_to_portfolio(
-            &mut portfolio,
-            "TestCo",
-            "WalletB",
-            "SOL",
-            7.0,
-            Some(700.0),
-        );
+        add_asset_to_portfolio(&mut portfolio, "TestCo", "WalletB", "SOL", 7.0, Some(700.0));
 
         let company = portfolio.companies.get("TestCo").unwrap();
 

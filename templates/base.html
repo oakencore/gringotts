@@ -596,6 +596,17 @@
         document.body.addEventListener('htmx:afterSwap', function() {
             lucide.createIcons();
         });
+
+        // Delegated click handler for any button with data-tsv: copy to clipboard.
+        document.body.addEventListener('click', async function(e) {
+            const btn = e.target.closest('[data-tsv]');
+            if (!btn) return;
+            try {
+                await navigator.clipboard.writeText(btn.dataset.tsv);
+            } catch (err) {
+                console.error('Clipboard write failed', err);
+            }
+        });
     </script>
 </body>
 </html>
