@@ -165,15 +165,9 @@ Expected: compilation failure (`add_asset_to_portfolio` has wrong arity, `Wallet
 
 - [ ] **Step 3: Implement the data model changes**
 
-In `src/types.rs`, replace lines 7-58 with:
+In `src/types.rs`, replace lines 7-58 with the following. **Do not touch lines 1-5** — the existing `use` block at the top of the file is unchanged. Start the replacement at the `// Portfolio summary structure` comment:
 
 ```rust
-use std::collections::HashMap;
-
-use crate::chains::{solana, evm, near, aptos, sui, starknet};
-use crate::banking::{mercury, circle};
-use crate::storage::{WalletAddress, BankingAccount};
-
 // Portfolio summary structure
 pub struct PortfolioSummary {
     pub companies: HashMap<String, CompanyAssets>,
@@ -479,9 +473,11 @@ use crate::query::{
     aggregate_mercury_balances, aggregate_circle_balances,
 };
 use crate::types::{PortfolioSummary, CompanyAssets, WalletAssets, PriceEnrichable};
+use crate::chains::{solana, evm, near, aptos, sui, starknet};
+use crate::banking::{mercury, circle};
 ```
 
-`PriceEnrichable` is needed so `enrich_from_cache` is callable on each chain's `AccountBalances`.
+`PriceEnrichable` is needed so `enrich_from_cache` is callable on each chain's `AccountBalances`. The `chains::*` and `banking::*` module imports are needed because the Phase A buffer declarations reference `solana::AccountBalances`, `evm::AccountBalances`, etc. — those module paths are not currently in scope in `web.rs` (only the client structs are).
 
 - [ ] **Step 3: Replace the `query_balances` handler body**
 
@@ -652,7 +648,7 @@ Html(
 )
 ```
 
-Add the import for `WalletAssets` from `crate::types` near the existing `PortfolioSummary` import.
+`WalletAssets` and `CompanyAssets` are already added in Step 2's import block — verify they are present.
 
 - [ ] **Step 4: Run `cargo build`**
 
