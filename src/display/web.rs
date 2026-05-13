@@ -474,6 +474,33 @@ fn escape_tsv(s: &str) -> String {
         .collect()
 }
 
+/// Build a TSV string from the balances template's `companies` data.
+/// Flattens (company, wallet, asset) into one row per asset. Header
+/// row is always included. USD values <= 0.0 render as an empty cell
+/// so the spreadsheet column stays numeric.
+fn build_balances_tsv(companies: &[(String, Vec<WalletGroup>)]) -> String {
+    let mut tsv = String::from("Company\tWallet\tSymbol\tAmount\tUSD Value\n");
+    for (company, wallets) in companies {
+        let company_clean = escape_tsv(company);
+        for wallet in wallets {
+            let wallet_clean = escape_tsv(&wallet.name);
+            for asset in &wallet.assets {
+                let symbol_clean = escape_tsv(&asset.symbol);
+                let usd_cell = if asset.usd_value > 0.0 {
+                    format!("{:.2}", asset.usd_value)
+                } else {
+                    String::new()
+                };
+                tsv.push_str(&format!(
+                    "{}\t{}\t{}\t{:.6}\t{}\n",
+                    company_clean, wallet_clean, symbol_clean, asset.amount, usd_cell
+                ));
+            }
+        }
+    }
+    tsv
+}
+
 /// Format a duration for display
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -3991,5 +4018,75 @@ mod tests {
         assert_eq!(escape_tsv(""), "");
         // Adjacent control chars collapse to one space each, not deduplicated
         assert_eq!(escape_tsv("a\t\tb"), "a  b");
+    }
+
+    #[test]
+    fn test_build_balances_tsv_flattens_company_wallet_asset() {
+        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
+            "Acme".to_string(),
+            vec![
+                WalletGroup {
+                    name: "WalletA".to_string(),
+                    total_usd: 400.0,
+                    assets: vec![
+                        AssetView {
+                            symbol: "SOL".to_string(),
+                            amount: 3.0,
+                            usd_value: 300.0,
+                        },
+                        AssetView {
+                            symbol: "USDC".to_string(),
+                            amount: 100.0,
+                            usd_value: 100.0,
+                        },
+                    ],
+                },
+                WalletGroup {
+                    name: "WalletB".to_string(),
+                    total_usd: 0.0,
+                    assets: vec![AssetView {
+                        symbol: "UNPRICED".to_string(),
+                        amount: 5.5,
+                        usd_value: 0.0,
+                    }],
+                },
+            ],
+        )];
+
+        let tsv = build_balances_tsv(&companies);
+        let lines: Vec<&str> = tsv.lines().collect();
+
+        assert_eq!(lines[0], "Company\tWallet\tSymbol\tAmount\tUSD Value");
+        assert_eq!(lines[1], "Acme\tWalletA\tSOL\t3.000000\t300.00");
+        assert_eq!(lines[2], "Acme\tWalletA\tUSDC\t100.000000\t100.00");
+        // Empty USD cell for value <= 0.0 (two adjacent tabs at end)
+        assert_eq!(lines[3], "Acme\tWalletB\tUNPRICED\t5.500000\t");
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn test_build_balances_tsv_escapes_control_chars_in_strings() {
+        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
+            "Ac\tme".to_string(),
+            vec![WalletGroup {
+                name: "Wal\nletA".to_string(),
+                total_usd: 100.0,
+                assets: vec![AssetView {
+                    symbol: "S\rOL".to_string(),
+                    amount: 1.0,
+                    usd_value: 100.0,
+                }],
+            }],
+        )];
+        let tsv = build_balances_tsv(&companies);
+        let lines: Vec<&str> = tsv.lines().collect();
+        // String cells get control chars replaced with spaces; numeric cells unaffected
+        assert_eq!(lines[1], "Ac me\tWal letA\tS OL\t1.000000\t100.00");
+    }
+
+    #[test]
+    fn test_build_balances_tsv_empty_input_returns_header_only() {
+        let tsv = build_balances_tsv(&[]);
+        assert_eq!(tsv, "Company\tWallet\tSymbol\tAmount\tUSD Value\n");
     }
 }
