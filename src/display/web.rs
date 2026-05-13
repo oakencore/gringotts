@@ -190,7 +190,8 @@ struct AddAccountForm {
 pub struct AppState {
     pub cache: SharedCache,
     pub api_key: Option<String>,
-    pub refresh_interval_secs: u64,
+    pub port: u16,
+    pub refresh_interval_secs: Arc<RwLock<u64>>,
     /// Timestamp of last manual refresh for rate limiting (Unix seconds)
     pub last_manual_refresh: Arc<RwLock<Option<u64>>>,
     /// Whether a refresh is currently in progress
@@ -353,7 +354,8 @@ pub async fn start_server(
     let state = Arc::new(AppState {
         cache,
         api_key,
-        refresh_interval_secs: interval.as_secs(),
+        port,
+        refresh_interval_secs: Arc::new(RwLock::new(interval.as_secs())),
         last_manual_refresh: Arc::new(RwLock::new(None)),
         refresh_in_progress: Arc::new(RwLock::new(false)),
     });
@@ -1777,6 +1779,7 @@ async fn get_company_totals_json(
 /// Returns server status, last refresh time, and next scheduled refresh.
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cache = state.cache.read().await;
+    let interval_secs = *state.refresh_interval_secs.read().await;
 
     // Calculate time until next refresh based on last refresh timestamp
     let (last_refresh_iso, next_refresh_in) = match cache.last_full_refresh {
@@ -1792,13 +1795,13 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 .unwrap_or_default()
                 .as_secs();
             let elapsed = now.saturating_sub(last_ts);
-            let next_in = state.refresh_interval_secs.saturating_sub(elapsed);
+            let next_in = interval_secs.saturating_sub(elapsed);
 
             (last_dt, format_duration(Duration::from_secs(next_in)))
         }
         None => (
             "never".to_string(),
-            format_duration(Duration::from_secs(state.refresh_interval_secs)),
+            format_duration(Duration::from_secs(interval_secs)),
         ),
     };
 
@@ -3306,7 +3309,8 @@ mod tests {
         let state = Arc::new(AppState {
             cache: SharedCache::new(),
             api_key: None,
-            refresh_interval_secs: 3600, // 1 hour
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)), // 1 hour
             last_manual_refresh: Arc::new(RwLock::new(None)),
             refresh_in_progress: Arc::new(RwLock::new(false)),
         });
@@ -3333,7 +3337,8 @@ mod tests {
         let state = Arc::new(AppState {
             cache,
             api_key: None,
-            refresh_interval_secs: 3600, // 1 hour
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)), // 1 hour
             last_manual_refresh: Arc::new(RwLock::new(None)),
             refresh_in_progress: Arc::new(RwLock::new(false)),
         });
@@ -3380,7 +3385,8 @@ mod tests {
         let state = Arc::new(AppState {
             cache,
             api_key: None,
-            refresh_interval_secs: 3600,
+            port: 3000,
+            refresh_interval_secs: Arc::new(RwLock::new(3600)),
             last_manual_refresh: Arc::new(RwLock::new(None)),
             refresh_in_progress: Arc::new(RwLock::new(false)),
         });
