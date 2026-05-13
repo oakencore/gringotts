@@ -12,6 +12,13 @@ pub struct PortfolioSummary {
 
 pub struct CompanyAssets {
     pub assets: HashMap<String, AssetSummary>,
+    pub wallets: HashMap<String, WalletAssets>,
+    pub total_usd_value: f64,
+}
+
+pub struct WalletAssets {
+    pub name: String,
+    pub assets: HashMap<String, AssetSummary>,
     pub total_usd_value: f64,
 }
 
@@ -24,6 +31,7 @@ pub struct AssetSummary {
 pub fn add_asset_to_portfolio(
     portfolio: &mut PortfolioSummary,
     company: &str,
+    wallet_name: &str,
     symbol: &str,
     amount: f64,
     usd_value: Option<f64>,
@@ -37,9 +45,11 @@ pub fn add_asset_to_portfolio(
         .entry(company.to_string())
         .or_insert_with(|| CompanyAssets {
             assets: HashMap::new(),
+            wallets: HashMap::new(),
             total_usd_value: 0.0,
         });
 
+    // Update aggregated rollup
     let asset = company_assets
         .assets
         .entry(symbol.to_string())
@@ -48,12 +58,34 @@ pub fn add_asset_to_portfolio(
             amount: 0.0,
             usd_value: None,
         });
-
     asset.amount += amount;
     if let Some(value) = usd_value {
         asset.usd_value = Some(asset.usd_value.unwrap_or(0.0) + value);
         company_assets.total_usd_value += value;
         portfolio.total_usd_value += value;
+    }
+
+    // Update per-wallet breakdown
+    let wallet = company_assets
+        .wallets
+        .entry(wallet_name.to_string())
+        .or_insert_with(|| WalletAssets {
+            name: wallet_name.to_string(),
+            assets: HashMap::new(),
+            total_usd_value: 0.0,
+        });
+    let wallet_asset = wallet
+        .assets
+        .entry(symbol.to_string())
+        .or_insert_with(|| AssetSummary {
+            symbol: symbol.to_string(),
+            amount: 0.0,
+            usd_value: None,
+        });
+    wallet_asset.amount += amount;
+    if let Some(value) = usd_value {
+        wallet_asset.usd_value = Some(wallet_asset.usd_value.unwrap_or(0.0) + value);
+        wallet.total_usd_value += value;
     }
 }
 

@@ -285,7 +285,14 @@ mod tests {
             total_usd_value: 0.0,
         };
 
-        add_asset_to_portfolio(&mut portfolio, "TestCo", "BTC", 1.0, Some(50000.0));
+        add_asset_to_portfolio(
+            &mut portfolio,
+            "TestCo",
+            "WalletA",
+            "BTC",
+            1.0,
+            Some(50000.0),
+        );
 
         assert_eq!(portfolio.companies.len(), 1);
         assert!(portfolio.companies.contains_key("TestCo"));
@@ -294,10 +301,18 @@ mod tests {
         let company = portfolio.companies.get("TestCo").unwrap();
         assert_eq!(company.total_usd_value, 50000.0);
         assert!(company.assets.contains_key("BTC"));
+        assert!(company.wallets.contains_key("WalletA"));
 
         let btc = company.assets.get("BTC").unwrap();
         assert_eq!(btc.amount, 1.0);
         assert_eq!(btc.usd_value, Some(50000.0));
+
+        let wallet_a = company.wallets.get("WalletA").unwrap();
+        assert_eq!(wallet_a.name, "WalletA");
+        assert_eq!(wallet_a.total_usd_value, 50000.0);
+        let wallet_btc = wallet_a.assets.get("BTC").unwrap();
+        assert_eq!(wallet_btc.amount, 1.0);
+        assert_eq!(wallet_btc.usd_value, Some(50000.0));
     }
 
     #[test]
@@ -307,16 +322,34 @@ mod tests {
             total_usd_value: 0.0,
         };
 
-        // Add same asset twice
-        add_asset_to_portfolio(&mut portfolio, "TestCo", "BTC", 1.0, Some(50000.0));
-        add_asset_to_portfolio(&mut portfolio, "TestCo", "BTC", 0.5, Some(25000.0));
+        add_asset_to_portfolio(
+            &mut portfolio,
+            "TestCo",
+            "WalletA",
+            "BTC",
+            1.0,
+            Some(50000.0),
+        );
+        add_asset_to_portfolio(
+            &mut portfolio,
+            "TestCo",
+            "WalletA",
+            "BTC",
+            0.5,
+            Some(25000.0),
+        );
 
         let company = portfolio.companies.get("TestCo").unwrap();
         let btc = company.assets.get("BTC").unwrap();
-
         assert_eq!(btc.amount, 1.5);
         assert_eq!(btc.usd_value, Some(75000.0));
         assert_eq!(portfolio.total_usd_value, 75000.0);
+
+        let wallet_a = company.wallets.get("WalletA").unwrap();
+        let wallet_btc = wallet_a.assets.get("BTC").unwrap();
+        assert_eq!(wallet_btc.amount, 1.5);
+        assert_eq!(wallet_btc.usd_value, Some(75000.0));
+        assert_eq!(wallet_a.total_usd_value, 75000.0);
     }
 
     #[test]
@@ -326,9 +359,74 @@ mod tests {
             total_usd_value: 0.0,
         };
 
-        add_asset_to_portfolio(&mut portfolio, "TestCo", "BTC", 0.0, Some(0.0));
+        add_asset_to_portfolio(&mut portfolio, "TestCo", "WalletA", "BTC", 0.0, Some(0.0));
 
         assert_eq!(portfolio.companies.len(), 0);
+    }
+
+    #[test]
+    fn test_add_asset_disaggregates_by_wallet() {
+        let mut portfolio = PortfolioSummary {
+            companies: HashMap::new(),
+            total_usd_value: 0.0,
+        };
+
+        add_asset_to_portfolio(&mut portfolio, "TestCo", "WalletA", "SOL", 3.0, Some(300.0));
+        add_asset_to_portfolio(
+            &mut portfolio,
+            "TestCo",
+            "WalletB",
+            "SOL",
+            7.0,
+            Some(700.0),
+        );
+
+        let company = portfolio.companies.get("TestCo").unwrap();
+
+        // Rollup: 10 SOL @ $1000
+        let sol_rollup = company.assets.get("SOL").unwrap();
+        assert_eq!(sol_rollup.amount, 10.0);
+        assert_eq!(sol_rollup.usd_value, Some(1000.0));
+
+        // Disaggregated: two wallets, each with their own SOL line
+        assert_eq!(company.wallets.len(), 2);
+
+        let walleta = company.wallets.get("WalletA").unwrap();
+        assert_eq!(walleta.assets.get("SOL").unwrap().amount, 3.0);
+        assert_eq!(walleta.total_usd_value, 300.0);
+
+        let acme = company.wallets.get("WalletB").unwrap();
+        assert_eq!(acme.assets.get("SOL").unwrap().amount, 7.0);
+        assert_eq!(acme.total_usd_value, 700.0);
+
+        // Company total still aggregates correctly
+        assert_eq!(company.total_usd_value, 1000.0);
+        assert_eq!(portfolio.total_usd_value, 1000.0);
+    }
+
+    #[test]
+    fn test_add_asset_multiple_symbols_in_one_wallet() {
+        let mut portfolio = PortfolioSummary {
+            companies: HashMap::new(),
+            total_usd_value: 0.0,
+        };
+
+        add_asset_to_portfolio(&mut portfolio, "TestCo", "WalletA", "SOL", 3.0, Some(300.0));
+        add_asset_to_portfolio(
+            &mut portfolio,
+            "TestCo",
+            "WalletA",
+            "USDC",
+            100.0,
+            Some(100.0),
+        );
+
+        let company = portfolio.companies.get("TestCo").unwrap();
+        let walleta = company.wallets.get("WalletA").unwrap();
+        assert_eq!(walleta.assets.len(), 2);
+        assert_eq!(walleta.assets.get("SOL").unwrap().amount, 3.0);
+        assert_eq!(walleta.assets.get("USDC").unwrap().amount, 100.0);
+        assert_eq!(walleta.total_usd_value, 400.0);
     }
 
     #[test]
