@@ -474,9 +474,7 @@ Expected: clean build (or only a `dead_code` warning on `total_portfolio_usd` / 
 cargo test -- --test-threads=1 2>&1 | tail -3
 ```
 
-Expected: 53 passing (52 baseline + 5 new tests: 3 from Task 2 + 2 from Task 3 Step 3 — but actually 4 from Task 2 and 2 from Task 3 = 6, so 58. Run and confirm the actual count, then commit.).
-
-Wait — Task 2 has 4 tests, Task 3 has 2 tests. Total new = 6. Baseline = 52. Expected = 58. Adjust the commit message in the next step to match the real count.
+Expected: **50 passing** (44 baseline at branch creation + 6 new: 4 from Task 2 + 2 from Task 3 Step 3). Verify the count matches before continuing; if the baseline drifted, recompute and use the actual numbers in Step 7's commit message.
 
 - [ ] **Step 7: Commit (covers Tasks 1, 2, and 3 together since they're a single bisect-safe unit)**
 
@@ -607,7 +605,7 @@ Expected: clean build. Askama compiles templates at build time so any field-refe
 cargo test -- --test-threads=1 2>&1 | tail -3
 ```
 
-Expected: 58 passing (no new tests in this task; template-only).
+Expected: 50 passing (no new tests in this task; template-only).
 
 - [ ] **Step 8: Commit**
 
@@ -651,7 +649,7 @@ Expected: warning count matches baseline (13 pre-existing dead-code on legacy mo
 cargo test -- --test-threads=1 2>&1 | tail -5
 ```
 
-Expected: 58 passing (52 baseline + 6 new). Lock the actual count once you run; the plan's prediction may drift.
+Expected: 50 passing (44 baseline + 6 new). Lock the actual count once you run; the plan's prediction may drift.
 
 - [ ] **Step 4: Manual smoke test**
 
@@ -700,7 +698,7 @@ Spec: `docs/superpowers/specs/2026-05-13-dashboard-cache-persistence-design.md`
 ## Test plan
 - [x] `cargo fmt --check` clean
 - [x] `cargo clippy --all-targets` no new warnings
-- [x] `cargo test` — 58 passing (52 baseline + 6 new)
+- [x] `cargo test -- --test-threads=1` — 50 passing (44 baseline + 6 new)
 - [ ] Manual smoke: navigate dashboard ⇄ Settings, verify rows persist; server restart, verify rows still display
 
 ## Out of scope (per spec)
