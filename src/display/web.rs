@@ -568,9 +568,6 @@ fn build_single_balance_tsv(
     tsv
 }
 
-/// Build a WalletView for a wallet, populating cached_* fields from
-/// the cache if an entry exists under wallet.name. Cache age is not
-/// checked - if there's an entry, we render it.
 /// Look up a balance by name in the cache. Returns
 /// (total_usd, native_symbol, native_balance) or all-None if absent.
 fn cached_fields(
@@ -587,6 +584,8 @@ fn cached_fields(
     }
 }
 
+/// Build a WalletView for a wallet, populating cached_* fields from
+/// the cache if an entry exists under wallet.name.
 fn populate_wallet_view(
     wallet: &crate::storage::WalletAddress,
     cache: &crate::services::cache::BalanceCache,
@@ -603,7 +602,8 @@ fn populate_wallet_view(
     }
 }
 
-/// Build a BankingView for an account, same caching shape as wallets.
+/// Build a BankingView for an account, same caching shape as
+/// populate_wallet_view.
 fn populate_banking_view(
     account: &crate::storage::BankingAccount,
     cache: &crate::services::cache::BalanceCache,
@@ -620,20 +620,33 @@ fn populate_banking_view(
     }
 }
 
-/// Sum cached total_usd_value across every wallet/account in the cache,
-/// and produce a human-readable freshness string for cache.last_full_refresh.
-/// Returns (total_portfolio_usd, last_refresh_human). The total is None
-/// if no cached entry has a usd value; last_refresh is "never" when the
-/// cache has never been refreshed (delegated to cache_age_string).
+/// Sum cached total_usd_value across every wallet/account in the AddressBook
+/// (using cached values from the cache), and produce a "Xm ago" timestamp.
+/// Orphan cache entries (for wallets/accounts the user has since removed) are
+/// excluded so the Total Portfolio Value card stays consistent with the
+/// visible rows.
 fn compute_dashboard_metrics(
+    book: &crate::storage::AddressBook,
     cache: &crate::services::cache::BalanceCache,
 ) -> (Option<f64>, String) {
+    let mut active_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for w in &book.addresses {
+        active_names.insert(w.name.as_str());
+    }
+    for a in &book.banking_accounts {
+        active_names.insert(a.name.as_str());
+    }
+
     let mut total_portfolio_usd: Option<f64> = None;
-    for entry in cache.balances.values() {
+    for (name, entry) in &cache.balances {
+        if !active_names.contains(name.as_str()) {
+            continue;
+        }
         if let Some(v) = entry.data.total_usd_value {
             *total_portfolio_usd.get_or_insert(0.0) += v;
         }
     }
+
     (total_portfolio_usd, cache.cache_age_string())
 }
 
@@ -2519,7 +2532,7 @@ async fn index(
         _ => !companies.is_empty(),
     };
 
-    let (total_portfolio_usd, last_refresh_human) = compute_dashboard_metrics(&cache);
+    let (total_portfolio_usd, last_refresh_human) = compute_dashboard_metrics(&book, &cache);
 
     let template = IndexTemplate {
         companies,
@@ -4481,6 +4494,7 @@ mod tests {
     #[test]
     fn test_compute_dashboard_metrics_sums_cached_totals() {
         use crate::services::cache::{BalanceCache, CachedBalance};
+        use crate::storage::AddressBook;
 
         let mut cache = BalanceCache::new();
         cache.set_balance(
@@ -4524,16 +4538,78 @@ mod tests {
             },
         );
 
-        let (total, _last) = compute_dashboard_metrics(&cache);
+        // AddressBook must include A, B, C as wallet names so the filter
+        // doesn't exclude them.
+        let mut book = AddressBook::new();
+        for name in ["A", "B", "C"] {
+            book.addresses.push(crate::storage::WalletAddress {
+                name: name.to_string(),
+                company: String::new(),
+                address: format!("addr_{}", name),
+                chain: crate::storage::Chain::Solana,
+            });
+        }
+
+        let (total, _last) = compute_dashboard_metrics(&book, &cache);
         assert_eq!(total, Some(300.0));
     }
 
     #[test]
     fn test_compute_dashboard_metrics_returns_none_for_empty_cache() {
         use crate::services::cache::BalanceCache;
+        use crate::storage::AddressBook;
         let cache = BalanceCache::new();
-        let (total, last) = compute_dashboard_metrics(&cache);
+        let book = AddressBook::new();
+        let (total, last) = compute_dashboard_metrics(&book, &cache);
         assert_eq!(total, None);
         assert_eq!(last, "never");
+    }
+
+    #[test]
+    fn test_compute_dashboard_metrics_excludes_orphan_cache_entries() {
+        use crate::services::cache::{BalanceCache, CachedBalance};
+        use crate::storage::{AddressBook, Chain, WalletAddress};
+
+        let mut cache = BalanceCache::new();
+        // Two cache entries; only "Active" is in the AddressBook.
+        cache.set_balance(
+            "Active",
+            CachedBalance {
+                name: "Active".to_string(),
+                address_or_id: "addr_active".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 1.0,
+                native_usd_value: Some(100.0),
+                tokens: vec![],
+                total_usd_value: Some(100.0),
+            },
+        );
+        cache.set_balance(
+            "Orphan",
+            CachedBalance {
+                name: "Orphan".to_string(),
+                address_or_id: "addr_orphan".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 99.0,
+                native_usd_value: Some(9900.0),
+                tokens: vec![],
+                total_usd_value: Some(9900.0),
+            },
+        );
+
+        let mut book = AddressBook::new();
+        book.addresses.push(WalletAddress {
+            name: "Active".to_string(),
+            company: String::new(),
+            address: "addr_active".to_string(),
+            chain: Chain::Solana,
+        });
+
+        let (total, _last) = compute_dashboard_metrics(&book, &cache);
+        // Only "Active" should contribute; "Orphan" is excluded despite
+        // having a $9900 cached balance.
+        assert_eq!(total, Some(100.0));
     }
 }
