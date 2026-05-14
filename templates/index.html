@@ -40,7 +40,9 @@
         <div class="metric-card-header">
             <span class="metric-label">Total Portfolio Value</span>
         </div>
-        <div class="metric-value" id="total-balance">--</div>
+        <div class="metric-value" id="total-balance">
+            {% if let Some(v) = total_portfolio_usd %}${{ v|format_usd }}{% else %}--{% endif %}
+        </div>
     </div>
 
     <!-- Last Refresh -->
@@ -52,7 +54,7 @@
                 <span>Synced</span>
             </span>
         </div>
-        <div class="metric-value" id="last-refresh">--</div>
+        <div class="metric-value" id="last-refresh">{{ last_refresh_human }}</div>
         <div class="metric-info">
             <i data-lucide="refresh-cw"></i>
             <span id="next-refresh">Auto-refresh enabled</span>
@@ -144,9 +146,16 @@
                     </td>
                     <td>{{ company.name }}</td>
                     <td><span class="chain-badge">{{ wallet.chain }}</span></td>
+                    <td class="amount">
+                        {% if let Some(bal) = wallet.cached_native_balance %}
+                            {{ bal|format_amount }}
+                            {% if let Some(sym) = wallet.cached_native_symbol %}{{ sym }}{% endif %}
+                        {% else %}--{% endif %}
+                    </td>
                     <td class="amount">--</td>
-                    <td class="amount">--</td>
-                    <td class="amount">--</td>
+                    <td class="amount {% if wallet.cached_total_usd.is_some() %}positive{% endif %}">
+                        {% if let Some(v) = wallet.cached_total_usd %}${{ v|format_usd }}{% else %}--{% endif %}
+                    </td>
                     <td>
                         <div class="row-actions">
                             <button class="btn btn-secondary btn-sm"
@@ -194,9 +203,16 @@
                     </td>
                     <td>{{ company.name }}</td>
                     <td><span class="chain-badge bank">{{ account.service }}</span></td>
+                    <td class="amount">
+                        {% if let Some(bal) = account.cached_native_balance %}
+                            {{ bal|format_amount }}
+                            {% if let Some(sym) = account.cached_native_symbol %}{{ sym }}{% endif %}
+                        {% else %}--{% endif %}
+                    </td>
                     <td class="amount">--</td>
-                    <td class="amount">--</td>
-                    <td class="amount">--</td>
+                    <td class="amount {% if account.cached_total_usd.is_some() %}positive{% endif %}">
+                        {% if let Some(v) = account.cached_total_usd %}${{ v|format_usd }}{% else %}--{% endif %}
+                    </td>
                     <td>
                         <div class="row-actions">
                             <button class="btn btn-secondary btn-sm"
@@ -412,9 +428,9 @@
 
     // Update refresh time display using textContent (safe)
     function updateRefreshTime() {
-        var now = new Date();
-        var timeStr = now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        document.getElementById('last-refresh').textContent = timeStr;
+        // Match the server-rendered "Xm ago" format. After a manual refresh
+        // we've just refreshed, so write "just now".
+        document.getElementById('last-refresh').textContent = 'just now';
     }
 
     // Listen for balance updates
