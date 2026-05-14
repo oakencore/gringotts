@@ -100,6 +100,8 @@ struct IndexTemplate {
     filter: String,
     active_nav: String,
     has_visible_rows: bool,
+    total_portfolio_usd: Option<f64>,
+    last_refresh_human: Option<String>,
 }
 
 struct CompanyGroup {
@@ -275,6 +277,9 @@ struct WalletView {
     company: String,
     address: String,
     chain: String,
+    cached_total_usd: Option<f64>,
+    cached_native_symbol: Option<String>,
+    cached_native_balance: Option<f64>,
 }
 
 struct BankingView {
@@ -283,6 +288,9 @@ struct BankingView {
     company: String,
     account_id: String,
     service: String,
+    cached_total_usd: Option<f64>,
+    cached_native_symbol: Option<String>,
+    cached_native_balance: Option<f64>,
 }
 
 struct AssetView {
@@ -558,6 +566,83 @@ fn build_single_balance_tsv(
         emit_row(&mut tsv, &token.symbol, token.balance, token.usd_value);
     }
     tsv
+}
+
+/// Build a WalletView for a wallet, populating cached_* fields from
+/// the cache if an entry exists under wallet.name. Cache age is not
+/// checked - if there's an entry, we render it.
+fn populate_wallet_view(
+    wallet: &crate::storage::WalletAddress,
+    cache: &crate::services::cache::BalanceCache,
+) -> WalletView {
+    let (total, sym, bal) = match cache.get_balance(&wallet.name, u64::MAX) {
+        Some(c) => (
+            c.total_usd_value,
+            Some(c.native_symbol.clone()),
+            Some(c.native_balance),
+        ),
+        None => (None, None, None),
+    };
+    WalletView {
+        name: wallet.name.clone(),
+        company: wallet.company.clone(),
+        address: wallet.address.clone(),
+        chain: wallet.chain.display_name().to_string(),
+        cached_total_usd: total,
+        cached_native_symbol: sym,
+        cached_native_balance: bal,
+    }
+}
+
+/// Build a BankingView for an account, same caching shape as wallets.
+fn populate_banking_view(
+    account: &crate::storage::BankingAccount,
+    cache: &crate::services::cache::BalanceCache,
+) -> BankingView {
+    let (total, sym, bal) = match cache.get_balance(&account.name, u64::MAX) {
+        Some(c) => (
+            c.total_usd_value,
+            Some(c.native_symbol.clone()),
+            Some(c.native_balance),
+        ),
+        None => (None, None, None),
+    };
+    BankingView {
+        name: account.name.clone(),
+        company: account.company.clone(),
+        account_id: account.account_id.clone(),
+        service: account.service.display_name().to_string(),
+        cached_total_usd: total,
+        cached_native_symbol: sym,
+        cached_native_balance: bal,
+    }
+}
+
+/// Sum cached total_usd_value across every wallet/account in the cache,
+/// and produce a human-readable "Xm ago" for cache.last_full_refresh.
+/// Returns (total_portfolio_usd, last_refresh_human). Both are Option:
+/// total is None if no cached entry has a usd value; last_refresh is
+/// None if the cache has never been refreshed.
+fn compute_dashboard_metrics(
+    cache: &crate::services::cache::BalanceCache,
+) -> (Option<f64>, Option<String>) {
+    let mut total_portfolio_usd: Option<f64> = None;
+    for entry in cache.balances.values() {
+        if let Some(v) = entry.data.total_usd_value {
+            *total_portfolio_usd.get_or_insert(0.0) += v;
+        }
+    }
+
+    let last_refresh_human = cache.last_full_refresh.map(|ts| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let elapsed = now.saturating_sub(ts);
+        format!("{} ago", format_duration(Duration::from_secs(elapsed)))
+    });
+
+    (total_portfolio_usd, last_refresh_human)
 }
 
 /// Format a duration for display
@@ -2375,13 +2460,14 @@ async fn get_companies_json() -> impl IntoResponse {
 }
 
 async fn index(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<DashboardFilter>,
 ) -> impl IntoResponse {
     let book = match AddressBook::load() {
         Ok(b) => b,
         Err(_) => AddressBook::new(),
     };
+    let cache = state.cache.read().await;
 
     let wallet_count = book.addresses.len();
     let bank_count = book.banking_accounts.len();
@@ -2401,12 +2487,7 @@ async fn index(
             w.company.clone()
         };
         let entry = company_map.entry(company_name).or_insert((vec![], vec![]));
-        entry.0.push(WalletView {
-            name: w.name.clone(),
-            company: w.company.clone(),
-            address: w.address.clone(),
-            chain: w.chain.display_name().to_string(),
-        });
+        entry.0.push(populate_wallet_view(w, &cache));
     }
 
     for a in &book.banking_accounts {
@@ -2416,12 +2497,7 @@ async fn index(
             a.company.clone()
         };
         let entry = company_map.entry(company_name).or_insert((vec![], vec![]));
-        entry.1.push(BankingView {
-            name: a.name.clone(),
-            company: a.company.clone(),
-            account_id: a.account_id.clone(),
-            service: a.service.display_name().to_string(),
-        });
+        entry.1.push(populate_banking_view(a, &cache));
     }
 
     // Sort companies alphabetically, but put "Uncategorized" last
@@ -2451,6 +2527,8 @@ async fn index(
         _ => !companies.is_empty(),
     };
 
+    let (total_portfolio_usd, last_refresh_human) = compute_dashboard_metrics(&cache);
+
     Html(
         IndexTemplate {
             companies,
@@ -2459,6 +2537,8 @@ async fn index(
             filter,
             active_nav,
             has_visible_rows,
+            total_portfolio_usd,
+            last_refresh_human,
         }
         .render()
         .unwrap_or_else(|e| format!("Template error: {}", e)),
@@ -4279,5 +4359,185 @@ mod tests {
         // Header + 1 token row only (native row omitted because amount is 0)
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], "WalletA\tSolana\taddr\tUSDC\t100.000000\t100.00");
+    }
+
+    #[test]
+    fn test_populate_wallet_view_pulls_from_cache_when_present() {
+        use crate::services::cache::{BalanceCache, CachedBalance};
+        use crate::storage::{Chain, WalletAddress};
+
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "WalletA",
+            CachedBalance {
+                name: "WalletA".to_string(),
+                address_or_id: "addr".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 3.5,
+                native_usd_value: Some(350.0),
+                tokens: vec![],
+                total_usd_value: Some(350.0),
+            },
+        );
+
+        let wallet = WalletAddress {
+            name: "WalletA".to_string(),
+            company: "Acme".to_string(),
+            address: "addr".to_string(),
+            chain: Chain::Solana,
+        };
+
+        let view = populate_wallet_view(&wallet, &cache);
+        assert_eq!(view.name, "WalletA");
+        assert_eq!(view.cached_total_usd, Some(350.0));
+        assert_eq!(view.cached_native_symbol, Some("SOL".to_string()));
+        assert_eq!(view.cached_native_balance, Some(3.5));
+    }
+
+    #[test]
+    fn test_populate_wallet_view_returns_none_fields_when_no_cache_entry() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{Chain, WalletAddress};
+
+        let cache = BalanceCache::new();
+        let wallet = WalletAddress {
+            name: "AbsentWallet".to_string(),
+            company: "Acme".to_string(),
+            address: "addr".to_string(),
+            chain: Chain::Solana,
+        };
+
+        let view = populate_wallet_view(&wallet, &cache);
+        assert_eq!(view.cached_total_usd, None);
+        assert_eq!(view.cached_native_symbol, None);
+        assert_eq!(view.cached_native_balance, None);
+    }
+
+    #[test]
+    fn test_populate_banking_view_pulls_from_cache_when_present() {
+        use crate::services::cache::{BalanceCache, CachedBalance};
+        use crate::storage::{BankingAccount, BankingService};
+
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "BankA",
+            CachedBalance {
+                name: "BankA".to_string(),
+                address_or_id: "acc_123".to_string(),
+                chain_or_service: "Mercury Banking".to_string(),
+                native_symbol: "USD".to_string(),
+                native_balance: 1500.0,
+                native_usd_value: Some(1500.0),
+                tokens: vec![],
+                total_usd_value: Some(1500.0),
+            },
+        );
+
+        let account = BankingAccount {
+            name: "BankA".to_string(),
+            company: "Acme".to_string(),
+            account_id: "acc_123".to_string(),
+            service: BankingService::Mercury,
+        };
+
+        let view = populate_banking_view(&account, &cache);
+        assert_eq!(view.cached_total_usd, Some(1500.0));
+        assert_eq!(view.cached_native_symbol, Some("USD".to_string()));
+        assert_eq!(view.cached_native_balance, Some(1500.0));
+    }
+
+    #[test]
+    fn test_populate_view_handles_cached_balance_with_none_total() {
+        // Wallet has a balance but no USD price (total_usd_value is None).
+        // The view should reflect that: native fields populated, total None.
+        use crate::services::cache::{BalanceCache, CachedBalance};
+        use crate::storage::{Chain, WalletAddress};
+
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "WalletNoPriced",
+            CachedBalance {
+                name: "WalletNoPriced".to_string(),
+                address_or_id: "addr".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 5.0,
+                native_usd_value: None,
+                tokens: vec![],
+                total_usd_value: None,
+            },
+        );
+
+        let wallet = WalletAddress {
+            name: "WalletNoPriced".to_string(),
+            company: "Acme".to_string(),
+            address: "addr".to_string(),
+            chain: Chain::Solana,
+        };
+
+        let view = populate_wallet_view(&wallet, &cache);
+        assert_eq!(view.cached_total_usd, None);
+        assert_eq!(view.cached_native_symbol, Some("SOL".to_string()));
+        assert_eq!(view.cached_native_balance, Some(5.0));
+    }
+
+    #[test]
+    fn test_compute_dashboard_metrics_sums_cached_totals() {
+        use crate::services::cache::{BalanceCache, CachedBalance};
+
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "A",
+            CachedBalance {
+                name: "A".to_string(),
+                address_or_id: "a".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 1.0,
+                native_usd_value: Some(100.0),
+                tokens: vec![],
+                total_usd_value: Some(100.0),
+            },
+        );
+        cache.set_balance(
+            "B",
+            CachedBalance {
+                name: "B".to_string(),
+                address_or_id: "b".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 2.0,
+                native_usd_value: Some(200.0),
+                tokens: vec![],
+                total_usd_value: Some(200.0),
+            },
+        );
+        // One entry with no price - excluded from the sum
+        cache.set_balance(
+            "C",
+            CachedBalance {
+                name: "C".to_string(),
+                address_or_id: "c".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 3.0,
+                native_usd_value: None,
+                tokens: vec![],
+                total_usd_value: None,
+            },
+        );
+
+        let (total, _last) = compute_dashboard_metrics(&cache);
+        assert_eq!(total, Some(300.0));
+    }
+
+    #[test]
+    fn test_compute_dashboard_metrics_returns_none_for_empty_cache() {
+        use crate::services::cache::BalanceCache;
+        let cache = BalanceCache::new();
+        let (total, last) = compute_dashboard_metrics(&cache);
+        assert_eq!(total, None);
+        assert_eq!(last, None);
     }
 }
