@@ -91,7 +91,7 @@ let (total, sym, bal) = match cached {
 entry.0.push(WalletView { /* ... */ cached_total_usd: total, cached_native_symbol: sym, cached_native_balance: bal });
 ```
 
-`CachedBalance.total_usd_value` is already `Option<f64>` in `src/services/cache.rs:50`, so the `None`-when-no-price flow threads through naturally. Tokens beyond the native asset are not pulled into the dashboard view (out of scope per Scope section).
+`CachedBalance.total_usd_value` is already `Option<f64>` in `src/services/cache.rs:49`, so the `None`-when-no-price flow threads through naturally. Tokens beyond the native asset are not pulled into the dashboard view (out of scope per Scope section).
 
 ### Section 3 — `templates/index.html` cell rendering
 
@@ -181,9 +181,19 @@ Line 55 (Last Refresh):
 </div>
 ```
 
-The JS at `updateRefreshTime()` (line 414) still overwrites `#last-refresh` after Refresh All, so live updates after manual refresh keep working. On a plain page-render-from-navigation, the server-rendered value is what the user sees.
+**JS update format alignment.** The existing `updateRefreshTime()` at `templates/index.html:414` writes a wall-clock string (`Date.prototype.toLocaleTimeString`) to `#last-refresh` after Refresh All. The server now renders `"3m ago"` style. Without changing the JS, the card would jump from `"3m ago"` to `"10:30:45 AM"` on click — visually jarring. Update `updateRefreshTime()` to write `"just now"` (since it fires immediately after a successful refresh) so the format stays consistent with the server's relative-time format.
 
-`#[allow(dead_code)]` note: the existing `#total-balance` JS writer can stay; the server now provides a meaningful initial value. No new CSS rules required (both cards already use `.metric-value`).
+```js
+function updateRefreshTime() {
+    document.getElementById('last-refresh').textContent = 'just now';
+}
+```
+
+The polling that runs every minute can simply not update the text — relative time updates would need a server round-trip and aren't worth the complexity. The Last Refresh card stays at `"just now"` until either the next Refresh All fires or the user navigates and returns (server then renders `"Xm ago"`).
+
+**`#total-balance` is updated via HTMX OOB, not JS.** `templates/balances.html:1` carries `<div id="total-balance" hx-swap-oob="innerHTML">${{ total_usd|format_usd }}</div>`, which overwrites the dashboard's `#total-balance` card whenever the `/balances` endpoint responds. Server-rendered initial value (`${{ v|format_usd }}`) uses the same `format_usd` filter, so the formatting matches byte-for-byte across the initial render and the post-Refresh-All update.
+
+No new CSS rules required (both cards already use `.metric-value`).
 
 ### Section 5 — Testing
 
@@ -197,9 +207,10 @@ The cleanest target is a small extracted helper `populate_wallet_view(wallet: &W
 End-to-end test of the handler itself is skipped because it depends on `AddressBook::load()` reading from `~/.gringotts/`.
 
 **Manual smoke:**
-- Run Query All; verify Balance and Value cells populate with cached numbers.
-- Navigate to Settings, then back to dashboard; verify cells still show numbers (not `--`).
-- Verify "Last refreshed: Xm ago" banner appears below the subtitle and updates appropriately.
+- Run Refresh All; verify Balance and Value cells populate with cached numbers.
+- Navigate to Settings, then back to dashboard; verify Balance/Value cells still show numbers (not `--`).
+- Verify the Last Refresh metric card shows `"Xm ago"` on page load and `"just now"` immediately after Refresh All.
+- Verify the Total Portfolio Value metric card shows the cached portfolio sum on page load and updates to the live value after Refresh All (via the existing HTMX OOB swap from `balances.html`).
 - Restart the server (cache persists to disk via `SharedCache::persist`); reload dashboard; verify numbers still display.
 
 **Quality gates** before opening a PR: `cargo fmt`, `cargo clippy` (no new warnings), `cargo test` (expect 53 passing — 52 baseline + 2 new tests, but the cardinality depends on how the helper is split; the plan task will lock the exact count).
