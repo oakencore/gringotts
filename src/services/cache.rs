@@ -142,6 +142,13 @@ impl BalanceCache {
         })
     }
 
+    /// Return the cached balance regardless of age. Used by surfaces
+    /// (like the dashboard) that prefer to render stale data over
+    /// rendering nothing, signaling freshness via a separate timestamp.
+    pub fn get_balance_unchecked(&self, name: &str) -> Option<&CachedBalance> {
+        self.balances.get(name).map(|e| &e.data)
+    }
+
     /// Update prices
     pub fn set_prices(&mut self, prices: HashMap<String, f64>) {
         self.prices = CacheEntry::new(prices);

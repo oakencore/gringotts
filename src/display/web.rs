@@ -101,7 +101,7 @@ struct IndexTemplate {
     active_nav: String,
     has_visible_rows: bool,
     total_portfolio_usd: Option<f64>,
-    last_refresh_human: Option<String>,
+    last_refresh_human: String,
 }
 
 struct CompanyGroup {
@@ -571,18 +571,27 @@ fn build_single_balance_tsv(
 /// Build a WalletView for a wallet, populating cached_* fields from
 /// the cache if an entry exists under wallet.name. Cache age is not
 /// checked - if there's an entry, we render it.
-fn populate_wallet_view(
-    wallet: &crate::storage::WalletAddress,
+/// Look up a balance by name in the cache. Returns
+/// (total_usd, native_symbol, native_balance) or all-None if absent.
+fn cached_fields(
+    name: &str,
     cache: &crate::services::cache::BalanceCache,
-) -> WalletView {
-    let (total, sym, bal) = match cache.get_balance(&wallet.name, u64::MAX) {
+) -> (Option<f64>, Option<String>, Option<f64>) {
+    match cache.get_balance_unchecked(name) {
         Some(c) => (
             c.total_usd_value,
             Some(c.native_symbol.clone()),
             Some(c.native_balance),
         ),
         None => (None, None, None),
-    };
+    }
+}
+
+fn populate_wallet_view(
+    wallet: &crate::storage::WalletAddress,
+    cache: &crate::services::cache::BalanceCache,
+) -> WalletView {
+    let (total, sym, bal) = cached_fields(&wallet.name, cache);
     WalletView {
         name: wallet.name.clone(),
         company: wallet.company.clone(),
@@ -599,14 +608,7 @@ fn populate_banking_view(
     account: &crate::storage::BankingAccount,
     cache: &crate::services::cache::BalanceCache,
 ) -> BankingView {
-    let (total, sym, bal) = match cache.get_balance(&account.name, u64::MAX) {
-        Some(c) => (
-            c.total_usd_value,
-            Some(c.native_symbol.clone()),
-            Some(c.native_balance),
-        ),
-        None => (None, None, None),
-    };
+    let (total, sym, bal) = cached_fields(&account.name, cache);
     BankingView {
         name: account.name.clone(),
         company: account.company.clone(),
@@ -619,30 +621,20 @@ fn populate_banking_view(
 }
 
 /// Sum cached total_usd_value across every wallet/account in the cache,
-/// and produce a human-readable "Xm ago" for cache.last_full_refresh.
-/// Returns (total_portfolio_usd, last_refresh_human). Both are Option:
-/// total is None if no cached entry has a usd value; last_refresh is
-/// None if the cache has never been refreshed.
+/// and produce a human-readable freshness string for cache.last_full_refresh.
+/// Returns (total_portfolio_usd, last_refresh_human). The total is None
+/// if no cached entry has a usd value; last_refresh is "never" when the
+/// cache has never been refreshed (delegated to cache_age_string).
 fn compute_dashboard_metrics(
     cache: &crate::services::cache::BalanceCache,
-) -> (Option<f64>, Option<String>) {
+) -> (Option<f64>, String) {
     let mut total_portfolio_usd: Option<f64> = None;
     for entry in cache.balances.values() {
         if let Some(v) = entry.data.total_usd_value {
             *total_portfolio_usd.get_or_insert(0.0) += v;
         }
     }
-
-    let last_refresh_human = cache.last_full_refresh.map(|ts| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let elapsed = now.saturating_sub(ts);
-        format!("{} ago", format_duration(Duration::from_secs(elapsed)))
-    });
-
-    (total_portfolio_usd, last_refresh_human)
+    (total_portfolio_usd, cache.cache_age_string())
 }
 
 /// Format a duration for display
@@ -2529,19 +2521,23 @@ async fn index(
 
     let (total_portfolio_usd, last_refresh_human) = compute_dashboard_metrics(&cache);
 
+    let template = IndexTemplate {
+        companies,
+        wallet_count,
+        bank_count,
+        filter,
+        active_nav,
+        has_visible_rows,
+        total_portfolio_usd,
+        last_refresh_human,
+    };
+    // Release the cache read guard before render so template work doesn't
+    // hold the lock against pending writers.
+    drop(cache);
     Html(
-        IndexTemplate {
-            companies,
-            wallet_count,
-            bank_count,
-            filter,
-            active_nav,
-            has_visible_rows,
-            total_portfolio_usd,
-            last_refresh_human,
-        }
-        .render()
-        .unwrap_or_else(|e| format!("Template error: {}", e)),
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
     )
 }
 
@@ -4538,6 +4534,6 @@ mod tests {
         let cache = BalanceCache::new();
         let (total, last) = compute_dashboard_metrics(&cache);
         assert_eq!(total, None);
-        assert_eq!(last, None);
+        assert_eq!(last, "never");
     }
 }
