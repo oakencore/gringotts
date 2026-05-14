@@ -5,9 +5,15 @@
 
 ## Problem
 
-The web UI's dashboard always renders `--` in the Balance / Price / Value cells until the user clicks **Query All**. The Query All HTMX call writes results into `state.cache`, but when the user navigates away (Settings, Transactions) and back, the dashboard is re-rendered from scratch and shows `--` again. The cache holds the data; the `index` handler at `src/display/web.rs:2377` simply doesn't read it (its `State(_state)` extractor is unused).
+The web UI's dashboard always renders `--` in three places until the user clicks **Refresh All**:
 
-Result: the user has to re-run Query All every time they revisit the dashboard, even though the cached numbers are still available — and may even be authoritative if the background refresh task has run since the last manual refresh.
+- Each wallet/account row's Balance / Price / Value cells.
+- The "Total Portfolio Value" metric card.
+- The "Last Refresh" metric card.
+
+The Refresh All HTMX call writes results into `state.cache`, but when the user navigates away (Settings, Transactions) and back, the dashboard is re-rendered from scratch and all three surfaces show `--` again. The cache holds the data; the `index` handler at `src/display/web.rs:2280` simply doesn't read it (its `State(_state)` extractor is unused).
+
+Result: the user has to re-run Refresh All every time they revisit the dashboard, even though the cached numbers are still available — and may even be authoritative if the background refresh task has run since the last manual refresh.
 
 ## Goal
 
@@ -15,14 +21,14 @@ Make the dashboard a stateful surface that reflects whatever the cache currently
 
 ## Scope
 
-- `src/display/web.rs` — `index` handler reads `state.cache`; `WalletView` / `BankingView` gain three optional display fields; `IndexTemplate` gains a `last_refresh_human: Option<String>` field.
-- `templates/index.html` — conditionally render the cached balance/value cells; add a "Last refreshed: Xm ago" banner near the page subtitle.
+- `src/display/web.rs` — `index` handler reads `state.cache`; `WalletView` / `BankingView` gain three optional display fields; `IndexTemplate` gains `total_portfolio_usd: Option<f64>` and `last_refresh_human: Option<String>` fields.
+- `templates/index.html` — conditionally render cached balance/value in wallet/account rows; populate the existing "Total Portfolio Value" and "Last Refresh" metric cards from the server-rendered template fields instead of letting JS be the only writer.
 
 **Out of scope:**
 
 - Per-asset price display in the dashboard's middle "Price" column. Would require additional lookups not currently performed; leaving as `--` for this PR.
 - Showing the full token list on the dashboard. Tokens beyond the native asset live in the per-wallet detail view (`single_balance.html`) and are not surfaced on the dashboard table.
-- Replacing Query All with a passive "refresh in background" model. Query All remains as an explicit user-triggered refresh.
+- Replacing Refresh All with a passive "refresh in background" model. Refresh All remains as an explicit user-triggered refresh.
 - Pruning stale entries from the cache. Cache durability is the existing `SharedCache::persist` mechanism; no changes.
 
 ## Design
@@ -48,11 +54,12 @@ A separate `last_refresh_human: Option<String>` is computed from `cache.last_ful
 
 ### Section 2 — `WalletView` / `BankingView` field additions
 
-Both view structs gain three optional fields populated from the cache:
+Both view structs (currently `WalletView` at `src/display/web.rs:270`, `BankingView` at `:278`) gain three optional fields populated from the cache. The existing `#[allow(dead_code)]` on the `company` field is preserved (cache lookup is by `name`, not `company`).
 
 ```rust
 struct WalletView {
     name: String,
+    #[allow(dead_code)]
     company: String,
     address: String,
     chain: String,
@@ -63,6 +70,7 @@ struct WalletView {
 
 struct BankingView {
     name: String,
+    #[allow(dead_code)]
     company: String,
     account_id: String,
     service: String,
@@ -83,11 +91,11 @@ let (total, sym, bal) = match cached {
 entry.0.push(WalletView { /* ... */ cached_total_usd: total, cached_native_symbol: sym, cached_native_balance: bal });
 ```
 
-`CachedBalance.total_usd_value` is already `Option<f64>` in `src/services/cache.rs`, so the `None`-when-no-price flow threads through naturally. Tokens beyond the native asset are not pulled into the dashboard view (out of scope per Scope section).
+`CachedBalance.total_usd_value` is already `Option<f64>` in `src/services/cache.rs:50`, so the `None`-when-no-price flow threads through naturally. Tokens beyond the native asset are not pulled into the dashboard view (out of scope per Scope section).
 
 ### Section 3 — `templates/index.html` cell rendering
 
-The wallet row's Balance / Price / Value cells at `templates/index.html:130-138` currently render `--`. Swap them for conditional cells:
+The wallet row's Balance / Price / Value cells at `templates/index.html:147-149` currently render `--` (three single-line `<td class="amount">--</td>` rows). Swap them for conditional cells:
 
 ```html
 <td class="amount">
@@ -108,15 +116,43 @@ The wallet row's Balance / Price / Value cells at `templates/index.html:130-138`
 </td>
 ```
 
-Banking rows (around line 178) get the symmetric treatment.
+Banking rows (`templates/index.html:197-199`) get the symmetric treatment.
 
 **Askama version check:** `{% if let Some(x) = expr %}` is supported in Askama 0.12+. The implementation plan will verify the project's Askama version and, if older, fall back to `cached_native_balance.is_some()` + `.unwrap()` pairs.
 
-### Section 4 — "Last refreshed" banner
+### Section 4 — Populate existing metric cards from the server
 
-`IndexTemplate` gains `last_refresh_human: Option<String>`. Handler:
+The dashboard already has two metric cards that render `--` until JS updates them after Refresh All:
+
+- `templates/index.html:43` — Total Portfolio Value, `<div class="metric-value" id="total-balance">--</div>`.
+- `templates/index.html:55` — Last Refresh, `<div class="metric-value" id="last-refresh">--</div>`.
+
+Both `id`s are addressed by `updateRefreshTime()` (at line 414) which the existing `/balances` HTMX swap triggers via `hx-on::after-request`. JS remains the writer for the live post-Refresh-All update.
+
+This task adds a **server-side initial value**: on page render, the handler populates each card with cached data so the dashboard "remembers" across navigation. After Refresh All, JS overwrites both — same as today.
+
+**`IndexTemplate` adds two fields:**
 
 ```rust
+struct IndexTemplate {
+    // ... existing fields ...
+    total_portfolio_usd: Option<f64>,
+    last_refresh_human: Option<String>,
+}
+```
+
+**Handler computation:**
+
+```rust
+// Sum cached total_usd_value across all wallets and banking accounts.
+let mut total_portfolio_usd: Option<f64> = None;
+for entry in cache.balances.values() {
+    if let Some(v) = entry.data.total_usd_value {
+        *total_portfolio_usd.get_or_insert(0.0) += v;
+    }
+}
+
+// Format "Xm ago" / "Xh ago" / "Xd ago" via the existing format_duration helper
 let last_refresh_human = cache.last_full_refresh.map(|ts| {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -127,28 +163,27 @@ let last_refresh_human = cache.last_full_refresh.map(|ts| {
 });
 ```
 
-`format_duration` is the existing helper at `src/display/web.rs:498` that produces strings like `"3m"`, `"4h"`, `"2d"`.
+`format_duration` is the existing helper at `src/display/web.rs:467` producing strings like `"3m"`, `"4h"`, `"2d"`. `cache.balances` is `HashMap<String, CacheEntry<CachedBalance>>` per `src/services/cache.rs:69`; the `.data.total_usd_value` access matches what `cache_status` uses today.
 
-Template: below the existing `.page-subtitle` (around `templates/index.html:8`):
+**Template changes** to `templates/index.html`:
 
+Line 43 (Total Portfolio Value):
 ```html
-{% if let Some(human) = last_refresh_human %}
-<span class="cache-timestamp">Last refreshed: {{ human }}</span>
-{% endif %}
+<div class="metric-value" id="total-balance">
+    {% if let Some(v) = total_portfolio_usd %}${{ v|format_usd }}{% else %}--{% endif %}
+</div>
 ```
 
-CSS (added to the existing `<style>` block):
-
-```css
-.cache-timestamp {
-    font-size: 12px;
-    color: var(--text-disabled);
-    font-family: var(--font-mono);
-    margin-left: 12px;
-}
+Line 55 (Last Refresh):
+```html
+<div class="metric-value" id="last-refresh">
+    {% if let Some(human) = last_refresh_human %}{{ human }}{% else %}--{% endif %}
+</div>
 ```
 
-The banner renders nothing when the cache has never been refreshed (`cache.last_full_refresh.is_none()`) — fresh server starts fall through to the existing subtitle alone.
+The JS at `updateRefreshTime()` (line 414) still overwrites `#last-refresh` after Refresh All, so live updates after manual refresh keep working. On a plain page-render-from-navigation, the server-rendered value is what the user sees.
+
+`#[allow(dead_code)]` note: the existing `#total-balance` JS writer can stay; the server now provides a meaningful initial value. No new CSS rules required (both cards already use `.metric-value`).
 
 ### Section 5 — Testing
 
