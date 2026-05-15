@@ -1,0 +1,81 @@
+{# Aggregated holdings table: one row per asset symbol, summed across every wallet. #}
+{# Rendered both inline by index.html (initial dashboard load) and standalone by /balances #}
+{# (Refresh All HTMX swap) so both code paths produce identical markup. #}
+{% if assets.is_empty() && cash.is_empty() %}
+<div class="empty">
+    <p class="text-muted">No crypto balances cached yet. Click Refresh All to fetch.</p>
+</div>
+{% else %}
+{% if !assets.is_empty() %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Asset</th>
+            <th>Chains</th>
+            <th style="text-align: right;">Balance</th>
+            <th style="text-align: right;">Price</th>
+            <th style="text-align: right;">Value</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for asset in assets %}
+        <tr>
+            <td>
+                <div class="asset-info">
+                    <div class="asset-icon">{{ asset.symbol }}</div>
+                    <div class="asset-name">{{ asset.symbol }}</div>
+                </div>
+            </td>
+            <td>
+                {% for chain in asset.chains %}
+                <span class="chain-badge">{{ chain }}</span>
+                {% endfor %}
+            </td>
+            <td class="amount">{{ asset.balance|format_amount }} {{ asset.symbol }}</td>
+            <td class="amount">
+                {% if let Some(p) = asset.price %}${{ p|format_usd }}{% else %}--{% endif %}
+            </td>
+            <td class="amount {% if asset.usd_value.is_some() %}positive{% endif %}">
+                {% if let Some(v) = asset.usd_value %}${{ v|format_usd }}{% else %}--{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% if !cash.is_empty() %}
+<div class="cash-section-header">
+    <span class="card-title">Cash</span>
+</div>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Account</th>
+            <th>Service</th>
+            <th style="text-align: right;">Balance</th>
+            <th style="text-align: right;">Value</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in cash %}
+        <tr>
+            <td>
+                <div class="asset-info">
+                    <div class="asset-icon" style="background: var(--green-tint);">
+                        <i data-lucide="landmark" style="width: 16px; height: 16px; color: var(--green-success);"></i>
+                    </div>
+                    <div class="asset-name">{{ row.name }}</div>
+                </div>
+            </td>
+            <td><span class="chain-badge bank">{{ row.service }}</span></td>
+            <td class="amount">{{ row.balance|format_amount }} {{ row.currency }}</td>
+            <td class="amount {% if row.usd_value.is_some() %}positive{% endif %}">
+                {% if let Some(v) = row.usd_value %}${{ v|format_usd }}{% else %}--{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endif %}
