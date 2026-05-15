@@ -8,15 +8,9 @@ use crate::chains::solana::SolanaClient;
 use crate::chains::starknet::StarknetClient;
 use crate::chains::sui::SuiClient;
 use crate::chains::{aptos, evm, near, solana, starknet, sui};
-use crate::query::{
-    aggregate_aptos_balances, aggregate_circle_balances, aggregate_evm_balances,
-    aggregate_mercury_balances, aggregate_near_balances, aggregate_solana_balances,
-    aggregate_starknet_balances, aggregate_sui_balances,
-};
 use crate::services::cache::{CachedBalance, CachedToken, SharedCache};
 use crate::services::price::PriceService;
 use crate::storage::{AddressBook, BankingService, Chain};
-use crate::types::{CompanyAssets, PortfolioSummary, PriceEnrichable, WalletAssets};
 
 use askama::Template;
 use axum::{
@@ -102,6 +96,18 @@ struct IndexTemplate {
     has_visible_rows: bool,
     total_portfolio_usd: Option<f64>,
     last_refresh_human: String,
+    /// Aggregated crypto holdings shown on the default dashboard view.
+    /// One row per asset symbol, summed across wallets.
+    assets: Vec<AssetAggregate>,
+    /// Per-account banking rows shown beneath the holdings table on the
+    /// default dashboard view. Kept separate from `assets` so cash and
+    /// crypto stay visually distinct.
+    cash: Vec<CashRow>,
+    /// TSV serialization of the currently displayed holdings table. Filter-
+    /// aware: aggregated for the dashboard, per-wallet for the wallets view,
+    /// per-account for the banking view. Embedded in a `data-tsv` attribute
+    /// the global click handler in base.html copies to the clipboard.
+    tsv_export: String,
 }
 
 struct CompanyGroup {
@@ -110,19 +116,14 @@ struct CompanyGroup {
     banking_accounts: Vec<BankingView>,
 }
 
+/// Partial rendered both inline by `index.html` (initial dashboard load) and
+/// as the standalone HTMX response from `/balances` (Refresh All), so the
+/// dashboard markup is identical regardless of how it was produced.
 #[derive(Template)]
-#[template(path = "balances.html")]
-struct BalancesTemplate {
-    total_usd: f64,
-    companies: Vec<(String, Vec<WalletGroup>)>,
-    tsv_export: String,
-    error: String,
-}
-
-struct WalletGroup {
-    name: String,
-    total_usd: f64,
-    assets: Vec<AssetView>,
+#[template(path = "holdings_table.html")]
+struct HoldingsTableTemplate {
+    assets: Vec<AssetAggregate>,
+    cash: Vec<CashRow>,
 }
 
 #[derive(Template)]
@@ -291,12 +292,6 @@ struct BankingView {
     cached_total_usd: Option<f64>,
     cached_native_symbol: Option<String>,
     cached_native_balance: Option<f64>,
-}
-
-struct AssetView {
-    symbol: String,
-    amount: f64,
-    usd_value: f64,
 }
 
 #[derive(Deserialize)]
@@ -484,38 +479,6 @@ fn escape_tsv(s: &str) -> String {
         .collect()
 }
 
-/// Build a TSV string from the balances template's `companies` data.
-/// Flattens (company, wallet, asset) into one row per asset. Header
-/// row is always included. USD values <= 0.0 render as an empty cell
-/// so the spreadsheet column stays numeric.
-fn build_balances_tsv(companies: &[(String, Vec<WalletGroup>)]) -> String {
-    let mut tsv = String::from("Company\tWallet\tSymbol\tAmount\tUSD Value\n");
-    for (company, wallets) in companies {
-        let company_clean = escape_tsv(company);
-        for wallet in wallets {
-            let wallet_clean = escape_tsv(&wallet.name);
-            for asset in &wallet.assets {
-                let symbol_clean = escape_tsv(&asset.symbol);
-                let usd_cell = if asset.usd_value > 0.0 {
-                    format!("{:.2}", asset.usd_value)
-                } else {
-                    String::new()
-                };
-                let amount_str = if asset.symbol == "USD" {
-                    format!("{:.2}", asset.amount)
-                } else {
-                    format!("{:.6}", asset.amount)
-                };
-                tsv.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\n",
-                    company_clean, wallet_clean, symbol_clean, amount_str, usd_cell
-                ));
-            }
-        }
-    }
-    tsv
-}
-
 /// Build a TSV string for a single-wallet detail view. Includes the
 /// native balance as the first asset row (skipped if native_balance
 /// == 0.0), followed by each token in `tokens`. Each row carries the
@@ -620,34 +583,311 @@ fn populate_banking_view(
     }
 }
 
-/// Sum cached total_usd_value across every wallet/account in the AddressBook
-/// (using cached values from the cache), and produce a "Xm ago" timestamp.
-/// Orphan cache entries (for wallets/accounts the user has since removed) are
-/// excluded so the Total Portfolio Value card stays consistent with the
-/// visible rows.
+/// One row in the dashboard's aggregated holdings table.
+/// Sums a single asset (by symbol) across every wallet that holds it.
+struct AssetAggregate {
+    symbol: String,
+    balance: f64,
+    usd_value: Option<f64>,
+    /// Effective price = usd_value / balance, when both are present and balance > 0.
+    price: Option<f64>,
+    /// Distinct chains the asset is held on, sorted alphabetically.
+    chains: Vec<String>,
+}
+
+/// One row in the dashboard's separate "Cash" section. Banking accounts are
+/// kept distinct from crypto aggregation per product call: a USD bank balance
+/// is conceptually different from a USDC stablecoin holding even though both
+/// are dollar-denominated.
+struct CashRow {
+    name: String,
+    service: String,
+    currency: String,
+    balance: f64,
+    usd_value: Option<f64>,
+}
+
+/// Aggregate cached crypto holdings across every wallet in the book by
+/// symbol. Native balance and SPL/ERC-20 tokens both contribute. Banking
+/// accounts are intentionally excluded (see `aggregate_cash_holdings`).
+/// Orphan cache entries (wallets the user has since removed) are skipped so
+/// the table stays consistent with the rest of the dashboard.
+fn aggregate_crypto_holdings(
+    book: &crate::storage::AddressBook,
+    cache: &crate::services::cache::BalanceCache,
+) -> Vec<AssetAggregate> {
+    let active_wallets: HashSet<&str> = book.addresses.iter().map(|w| w.name.as_str()).collect();
+
+    struct Bucket {
+        balance: f64,
+        usd_value: Option<f64>,
+        chains: HashSet<String>,
+    }
+    let mut buckets: HashMap<String, Bucket> = HashMap::new();
+
+    let mut fold = |buckets: &mut HashMap<String, Bucket>,
+                    symbol: &str,
+                    balance: f64,
+                    usd: Option<f64>,
+                    chain: &str| {
+        if balance == 0.0 && usd.unwrap_or(0.0) == 0.0 {
+            return;
+        }
+        let entry = buckets.entry(symbol.to_string()).or_insert_with(|| Bucket {
+            balance: 0.0,
+            usd_value: None,
+            chains: HashSet::new(),
+        });
+        entry.balance += balance;
+        if let Some(v) = usd {
+            *entry.usd_value.get_or_insert(0.0) += v;
+        }
+        entry.chains.insert(chain.to_string());
+    };
+
+    // Per-wallet usd_value isn't always populated (e.g., chain clients that
+    // don't fetch prices themselves), but the global price cache usually has
+    // a quote for the symbol. Fall back to balance * price when the per-wallet
+    // value is missing so the aggregated row still gets a Price/Value.
+    let global_prices = &cache.prices.data;
+    let derive_usd = |symbol: &str, balance: f64, explicit: Option<f64>| -> Option<f64> {
+        explicit.or_else(|| global_prices.get(symbol).map(|p| balance * p))
+    };
+
+    for (name, entry) in &cache.balances {
+        if !active_wallets.contains(name.as_str()) {
+            continue;
+        }
+        let cached = &entry.data;
+        fold(
+            &mut buckets,
+            &cached.native_symbol,
+            cached.native_balance,
+            derive_usd(
+                &cached.native_symbol,
+                cached.native_balance,
+                cached.native_usd_value,
+            ),
+            &cached.chain_or_service,
+        );
+        for token in &cached.tokens {
+            fold(
+                &mut buckets,
+                &token.symbol,
+                token.balance,
+                derive_usd(&token.symbol, token.balance, token.usd_value),
+                &cached.chain_or_service,
+            );
+        }
+    }
+
+    let mut rows: Vec<AssetAggregate> = buckets
+        .into_iter()
+        .map(|(symbol, b)| {
+            let mut chains: Vec<String> = b.chains.into_iter().collect();
+            chains.sort();
+            let price = match (b.usd_value, b.balance) {
+                (Some(v), bal) if bal > 0.0 => Some(v / bal),
+                _ => None,
+            };
+            AssetAggregate {
+                symbol,
+                balance: b.balance,
+                usd_value: b.usd_value,
+                price,
+                chains,
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| match (a.usd_value, b.usd_value) {
+        (Some(av), Some(bv)) => bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.symbol.cmp(&b.symbol),
+    });
+    rows
+}
+
+/// Build the per-account "Cash" rows for the dashboard. Returns one row per
+/// banking account that has a cached balance.
+fn aggregate_cash_holdings(
+    book: &crate::storage::AddressBook,
+    cache: &crate::services::cache::BalanceCache,
+) -> Vec<CashRow> {
+    let mut rows = Vec::new();
+    for account in &book.banking_accounts {
+        if let Some(c) = cache.get_balance_unchecked(&account.name) {
+            rows.push(CashRow {
+                name: account.name.clone(),
+                service: account.service.display_name().to_string(),
+                currency: c.native_symbol.clone(),
+                balance: c.native_balance,
+                usd_value: c.total_usd_value,
+            });
+        }
+    }
+    rows.sort_by(|a, b| match (a.usd_value, b.usd_value) {
+        (Some(av), Some(bv)) => bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.name.cmp(&b.name),
+    });
+    rows
+}
+
+/// Format an amount cell for TSV. USD-denominated rows use 2 decimals,
+/// crypto rows use 6 to preserve fractional token detail.
+fn format_tsv_amount(symbol: &str, amount: f64) -> String {
+    if symbol == "USD" {
+        format!("{:.2}", amount)
+    } else {
+        format!("{:.6}", amount)
+    }
+}
+
+/// Format a USD cell for TSV. None / non-positive collapses to an empty cell
+/// so the spreadsheet column stays numeric.
+fn format_tsv_usd(value: Option<f64>) -> String {
+    match value {
+        Some(v) if v > 0.0 => format!("{:.2}", v),
+        _ => String::new(),
+    }
+}
+
+/// TSV mirroring the aggregated dashboard view: one row per asset symbol,
+/// followed by one row per cash account. Header is always emitted.
+fn aggregated_holdings_tsv(assets: &[AssetAggregate], cash: &[CashRow]) -> String {
+    let mut tsv = String::from("Symbol\tChains\tBalance\tPrice\tUSD Value\n");
+    for a in assets {
+        let chains = a.chains.join(", ");
+        let price = a.price.map(|p| format!("{:.2}", p)).unwrap_or_default();
+        tsv.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            escape_tsv(&a.symbol),
+            escape_tsv(&chains),
+            format_tsv_amount(&a.symbol, a.balance),
+            price,
+            format_tsv_usd(a.usd_value),
+        ));
+    }
+    for c in cash {
+        tsv.push_str(&format!(
+            "{} ({})\t{}\t{}\t\t{}\n",
+            escape_tsv(&c.name),
+            escape_tsv(&c.currency),
+            escape_tsv(&c.service),
+            format_tsv_amount(&c.currency, c.balance),
+            format_tsv_usd(c.usd_value),
+        ));
+    }
+    tsv
+}
+
+/// TSV for the per-wallet view. One row per (wallet, asset), including
+/// every token the cache knows about for that wallet (native first, then
+/// each token). Falls back to `cache.prices` for USD when the per-wallet
+/// `usd_value` is missing — same behavior as the aggregator.
+fn per_wallet_tsv(
+    book: &crate::storage::AddressBook,
+    cache: &crate::services::cache::BalanceCache,
+) -> String {
+    let mut tsv = String::from("Company\tWallet\tChain\tSymbol\tAmount\tUSD Value\n");
+    let prices = &cache.prices.data;
+    let derive_usd = |symbol: &str, balance: f64, explicit: Option<f64>| -> Option<f64> {
+        explicit.or_else(|| prices.get(symbol).map(|p| balance * p))
+    };
+
+    for w in &book.addresses {
+        let Some(c) = cache.get_balance_unchecked(&w.name) else {
+            continue;
+        };
+        let company = if w.company.is_empty() {
+            "Uncategorized"
+        } else {
+            w.company.as_str()
+        };
+        let mut emit = |sym: &str, amount: f64, usd: Option<f64>| {
+            if amount == 0.0 && usd.unwrap_or(0.0) == 0.0 {
+                return;
+            }
+            tsv.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                escape_tsv(company),
+                escape_tsv(&w.name),
+                escape_tsv(&c.chain_or_service),
+                escape_tsv(sym),
+                format_tsv_amount(sym, amount),
+                format_tsv_usd(usd),
+            ));
+        };
+        emit(
+            &c.native_symbol,
+            c.native_balance,
+            derive_usd(&c.native_symbol, c.native_balance, c.native_usd_value),
+        );
+        for t in &c.tokens {
+            emit(
+                &t.symbol,
+                t.balance,
+                derive_usd(&t.symbol, t.balance, t.usd_value),
+            );
+        }
+    }
+    tsv
+}
+
+/// TSV for the banking view. One row per banking account.
+fn per_account_tsv(
+    book: &crate::storage::AddressBook,
+    cache: &crate::services::cache::BalanceCache,
+) -> String {
+    let mut tsv = String::from("Company\tAccount\tService\tCurrency\tBalance\tUSD Value\n");
+    for a in &book.banking_accounts {
+        let Some(c) = cache.get_balance_unchecked(&a.name) else {
+            continue;
+        };
+        let company = if a.company.is_empty() {
+            "Uncategorized"
+        } else {
+            a.company.as_str()
+        };
+        tsv.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            escape_tsv(company),
+            escape_tsv(&a.name),
+            escape_tsv(&c.chain_or_service),
+            escape_tsv(&c.native_symbol),
+            format_tsv_amount(&c.native_symbol, c.native_balance),
+            format_tsv_usd(c.total_usd_value),
+        ));
+    }
+    tsv
+}
+
+/// Sum the dashboard's portfolio value and produce a "Xm ago" timestamp.
+/// Delegates to the same aggregators that build the holdings table, so the
+/// metric card and the table stay in lockstep — including the
+/// `cache.prices` fallback for chains whose clients don't price themselves
+/// (otherwise the metric reads 0 even after a successful refresh).
 fn compute_dashboard_metrics(
     book: &crate::storage::AddressBook,
     cache: &crate::services::cache::BalanceCache,
 ) -> (Option<f64>, String) {
-    let mut active_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for w in &book.addresses {
-        active_names.insert(w.name.as_str());
-    }
-    for a in &book.banking_accounts {
-        active_names.insert(a.name.as_str());
-    }
-
-    let mut total_portfolio_usd: Option<f64> = None;
-    for (name, entry) in &cache.balances {
-        if !active_names.contains(name.as_str()) {
-            continue;
-        }
-        if let Some(v) = entry.data.total_usd_value {
-            *total_portfolio_usd.get_or_insert(0.0) += v;
+    let assets = aggregate_crypto_holdings(book, cache);
+    let cash = aggregate_cash_holdings(book, cache);
+    let mut total: Option<f64> = None;
+    for a in &assets {
+        if let Some(v) = a.usd_value {
+            *total.get_or_insert(0.0) += v;
         }
     }
-
-    (total_portfolio_usd, cache.cache_age_string())
+    for c in &cash {
+        if let Some(v) = c.usd_value {
+            *total.get_or_insert(0.0) += v;
+        }
+    }
+    (total, cache.cache_age_string())
 }
 
 /// Format a duration for display
@@ -2525,14 +2765,28 @@ async fn index(
         }
     });
 
-    // Compute has_visible_rows AFTER companies is built
+    // Aggregate crypto + cash for the default dashboard view. The
+    // wallets/banking filter views still iterate `companies` so the
+    // per-wallet management actions stay reachable from those pages.
+    let assets = aggregate_crypto_holdings(&book, &cache);
+    let cash = aggregate_cash_holdings(&book, &cache);
+
+    // Compute has_visible_rows AFTER companies/assets/cash are built. The
+    // default dashboard now considers itself non-empty when *any* aggregated
+    // row is present, not just when an account exists in the book.
     let has_visible_rows = match filter.as_str() {
         "wallets" => companies.iter().any(|c| !c.wallets.is_empty()),
         "banking" => companies.iter().any(|c| !c.banking_accounts.is_empty()),
-        _ => !companies.is_empty(),
+        _ => !assets.is_empty() || !cash.is_empty() || !companies.is_empty(),
     };
 
     let (total_portfolio_usd, last_refresh_human) = compute_dashboard_metrics(&book, &cache);
+
+    let tsv_export = match filter.as_str() {
+        "wallets" => per_wallet_tsv(&book, &cache),
+        "banking" => per_account_tsv(&book, &cache),
+        _ => aggregated_holdings_tsv(&assets, &cash),
+    };
 
     let template = IndexTemplate {
         companies,
@@ -2543,6 +2797,9 @@ async fn index(
         has_visible_rows,
         total_portfolio_usd,
         last_refresh_human,
+        assets,
+        cash,
+        tsv_export,
     };
     // Release the cache read guard before render so template work doesn't
     // hold the lock against pending writers.
@@ -2650,26 +2907,24 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let book = match AddressBook::load() {
         Ok(b) => b,
         Err(e) => {
-            return Html(
-                BalancesTemplate {
-                    total_usd: 0.0,
-                    companies: vec![],
-                    tsv_export: String::new(),
-                    error: format!("Failed to load accounts: {}", e),
-                }
-                .render()
-                .unwrap_or_default(),
-            );
+            // Escape user-visible error string defensively.
+            let safe = e
+                .to_string()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            return Html(format!(
+                "<div class=\"empty\"><p>Failed to load accounts: {}</p></div>",
+                safe
+            ));
         }
     };
 
     if book.addresses.is_empty() && book.banking_accounts.is_empty() {
         return Html(
-            BalancesTemplate {
-                total_usd: 0.0,
-                companies: vec![],
-                tsv_export: String::new(),
-                error: String::new(),
+            HoldingsTableTemplate {
+                assets: vec![],
+                cash: vec![],
             }
             .render()
             .unwrap_or_default(),
@@ -3070,93 +3325,75 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
     let _ = state.cache.mark_refresh().await;
 
-    // --- Phase C: enrich balances with prices, then aggregate into PortfolioSummary ---
+    // Phase A wrote per-wallet `CachedBalance` rows; Phase B refreshed the
+    // shared `cache.prices` map. The aggregator falls back to that map when a
+    // per-wallet `usd_value` is missing, so we don't need to re-enrich the
+    // individual cache entries before rendering.
+    //
+    // Drop the in-memory chain buffers explicitly: we wrote everything we need
+    // to the shared cache, and they hold per-wallet detail the dashboard no
+    // longer surfaces here.
+    drop((
+        solana_buffer,
+        evm_buffer,
+        near_buffer,
+        aptos_buffer,
+        sui_buffer,
+        starknet_buffer,
+        mercury_buffer,
+        circle_buffer,
+        prices,
+    ));
 
-    let mut portfolio = PortfolioSummary {
-        companies: HashMap::new(),
-        total_usd_value: 0.0,
-    };
+    let cache_guard = state.cache.read().await;
+    let assets = aggregate_crypto_holdings(&book, &cache_guard);
+    let cash = aggregate_cash_holdings(&book, &cache_guard);
+    let (total_portfolio_usd, _) = compute_dashboard_metrics(&book, &cache_guard);
+    let tsv_export = aggregated_holdings_tsv(&assets, &cash);
+    drop(cache_guard);
 
-    for (company, name, mut balances) in solana_buffer {
-        balances.enrich_from_cache(&prices);
-        aggregate_solana_balances(&mut portfolio, &company, &name, &balances);
-    }
-    for (company, name, mut balances, chain) in evm_buffer {
-        balances.enrich_from_cache(&prices);
-        aggregate_evm_balances(&mut portfolio, &company, &name, &balances, &chain);
-    }
-    for (company, name, mut balances) in near_buffer {
-        balances.enrich_from_cache(&prices);
-        aggregate_near_balances(&mut portfolio, &company, &name, &balances);
-    }
-    for (company, name, mut balances) in aptos_buffer {
-        balances.enrich_from_cache(&prices);
-        aggregate_aptos_balances(&mut portfolio, &company, &name, &balances);
-    }
-    for (company, name, mut balances) in sui_buffer {
-        balances.enrich_from_cache(&prices);
-        aggregate_sui_balances(&mut portfolio, &company, &name, &balances);
-    }
-    for (company, name, mut balances) in starknet_buffer {
-        balances.enrich_from_cache(&prices);
-        aggregate_starknet_balances(&mut portfolio, &company, &name, &balances);
-    }
-    for (company, name, balances) in mercury_buffer {
-        aggregate_mercury_balances(&mut portfolio, &company, &name, &balances);
-    }
-    for (company, name, balances) in circle_buffer {
-        aggregate_circle_balances(&mut portfolio, &company, &name, &balances);
-    }
-
-    // --- Phase D: build template data from portfolio ---
-
-    let mut companies_view: Vec<(String, Vec<WalletGroup>)> = Vec::new();
-    let mut sorted_companies: Vec<(&String, &CompanyAssets)> = portfolio.companies.iter().collect();
-    sorted_companies.sort_by(|a, b| b.1.total_usd_value.total_cmp(&a.1.total_usd_value));
-
-    for (company_name, company) in sorted_companies {
-        let mut wallets_view: Vec<WalletGroup> = Vec::new();
-        let mut sorted_wallets: Vec<&WalletAssets> = company.wallets.values().collect();
-        sorted_wallets.sort_by(|a, b| b.total_usd_value.total_cmp(&a.total_usd_value));
-
-        for wallet_assets in sorted_wallets {
-            if wallet_assets.assets.is_empty() {
-                continue;
-            }
-            let mut asset_views: Vec<AssetView> = wallet_assets
-                .assets
-                .values()
-                .map(|a| AssetView {
-                    symbol: a.symbol.clone(),
-                    amount: a.amount,
-                    usd_value: a.usd_value.unwrap_or(0.0),
-                })
-                .collect();
-            asset_views.sort_by(|a, b| b.usd_value.total_cmp(&a.usd_value));
-
-            wallets_view.push(WalletGroup {
-                name: wallet_assets.name.clone(),
-                total_usd: wallet_assets.total_usd_value,
-                assets: asset_views,
-            });
-        }
-
-        if !wallets_view.is_empty() {
-            companies_view.push((company_name.clone(), wallets_view));
-        }
-    }
-
-    let tsv = build_balances_tsv(&companies_view);
-
-    Html(
-        BalancesTemplate {
-            total_usd: portfolio.total_usd_value,
-            companies: companies_view,
-            tsv_export: tsv,
-            error: String::new(),
-        }
+    let table_html = HoldingsTableTemplate { assets, cash }
         .render()
-        .unwrap_or_default(),
+        .unwrap_or_default();
+
+    // Out-of-band swaps so the metric card and the Copy TSV button refresh
+    // alongside the holdings table from the same response. Without these
+    // they'd stay at whatever values were rendered server-side at page load.
+    let total_html = format_total_portfolio_oob(total_portfolio_usd);
+    let copy_tsv_html = format_copy_tsv_oob(&tsv_export);
+    Html(format!("{}\n{}\n{}", table_html, total_html, copy_tsv_html))
+}
+
+/// Render the metric card's content as an HTMX out-of-band swap. Matches the
+/// element id and class set in `templates/index.html` so the swap is a clean
+/// drop-in replacement.
+fn format_total_portfolio_oob(total: Option<f64>) -> String {
+    let inner = match total {
+        Some(v) => format!("${}", filters::format_usd(&v).unwrap_or_default()),
+        None => "--".to_string(),
+    };
+    format!(
+        "<div class=\"metric-value\" id=\"total-balance\" hx-swap-oob=\"true\">{}</div>",
+        inner
+    )
+}
+
+/// HTML attribute escape for the `data-tsv` payload. Quotes, ampersands, and
+/// angle brackets must be escaped or the browser will see the next attribute
+/// as part of the value.
+fn html_attr_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// OOB swap of the Copy TSV button with a fresh `data-tsv` payload.
+fn format_copy_tsv_oob(tsv: &str) -> String {
+    format!(
+        "<button id=\"copy-tsv-btn\" class=\"btn btn-secondary btn-sm\" data-tsv=\"{}\" title=\"Copy as TSV (paste into a spreadsheet)\" hx-swap-oob=\"true\"><i data-lucide=\"clipboard\"></i><span class=\"btn-text\">Copy TSV</span></button>",
+        html_attr_escape(tsv)
     )
 }
 
@@ -4212,95 +4449,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_balances_tsv_flattens_company_wallet_asset() {
-        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
-            "Acme".to_string(),
-            vec![
-                WalletGroup {
-                    name: "WalletA".to_string(),
-                    total_usd: 400.0,
-                    assets: vec![
-                        AssetView {
-                            symbol: "SOL".to_string(),
-                            amount: 3.0,
-                            usd_value: 300.0,
-                        },
-                        AssetView {
-                            symbol: "USDC".to_string(),
-                            amount: 100.0,
-                            usd_value: 100.0,
-                        },
-                    ],
-                },
-                WalletGroup {
-                    name: "WalletB".to_string(),
-                    total_usd: 0.0,
-                    assets: vec![AssetView {
-                        symbol: "UNPRICED".to_string(),
-                        amount: 5.5,
-                        usd_value: 0.0,
-                    }],
-                },
-            ],
-        )];
-
-        let tsv = build_balances_tsv(&companies);
-        let lines: Vec<&str> = tsv.lines().collect();
-
-        assert_eq!(lines[0], "Company\tWallet\tSymbol\tAmount\tUSD Value");
-        assert_eq!(lines[1], "Acme\tWalletA\tSOL\t3.000000\t300.00");
-        assert_eq!(lines[2], "Acme\tWalletA\tUSDC\t100.000000\t100.00");
-        // Empty USD cell for value <= 0.0 (two adjacent tabs at end)
-        assert_eq!(lines[3], "Acme\tWalletB\tUNPRICED\t5.500000\t");
-        assert_eq!(lines.len(), 4);
-    }
-
-    #[test]
-    fn test_build_balances_tsv_escapes_control_chars_in_strings() {
-        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
-            "Ac\tme".to_string(),
-            vec![WalletGroup {
-                name: "Wal\nletA".to_string(),
-                total_usd: 100.0,
-                assets: vec![AssetView {
-                    symbol: "S\rOL".to_string(),
-                    amount: 1.0,
-                    usd_value: 100.0,
-                }],
-            }],
-        )];
-        let tsv = build_balances_tsv(&companies);
-        let lines: Vec<&str> = tsv.lines().collect();
-        // String cells get control chars replaced with spaces; numeric cells unaffected
-        assert_eq!(lines[1], "Ac me\tWal letA\tS OL\t1.000000\t100.00");
-    }
-
-    #[test]
-    fn test_build_balances_tsv_empty_input_returns_header_only() {
-        let tsv = build_balances_tsv(&[]);
-        assert_eq!(tsv, "Company\tWallet\tSymbol\tAmount\tUSD Value\n");
-    }
-
-    #[test]
-    fn test_build_balances_tsv_usd_uses_two_decimal_precision() {
-        let companies: Vec<(String, Vec<WalletGroup>)> = vec![(
-            "Acme".to_string(),
-            vec![WalletGroup {
-                name: "BankA".to_string(),
-                total_usd: 1500.0,
-                assets: vec![AssetView {
-                    symbol: "USD".to_string(),
-                    amount: 1500.0,
-                    usd_value: 1500.0,
-                }],
-            }],
-        )];
-        let tsv = build_balances_tsv(&companies);
-        let lines: Vec<&str> = tsv.lines().collect();
-        assert_eq!(lines[1], "Acme\tBankA\tUSD\t1500.00\t1500.00");
-    }
-
-    #[test]
     fn test_build_single_balance_tsv_includes_native_and_tokens() {
         let tokens = vec![
             TokenView {
@@ -4611,5 +4759,468 @@ mod tests {
         // Only "Active" should contribute; "Orphan" is excluded despite
         // having a $9900 cached balance.
         assert_eq!(total, Some(100.0));
+    }
+
+    #[test]
+    fn test_format_total_portfolio_oob_renders_with_dollar_sign_and_commas() {
+        let html = format_total_portfolio_oob(Some(12345.67));
+        assert!(
+            html.contains("id=\"total-balance\""),
+            "missing id: {}",
+            html
+        );
+        assert!(
+            html.contains("hx-swap-oob=\"true\""),
+            "missing oob attr: {}",
+            html
+        );
+        assert!(html.contains("$12,345.67"), "wrong value: {}", html);
+    }
+
+    #[test]
+    fn test_format_total_portfolio_oob_renders_dashes_when_unknown() {
+        let html = format_total_portfolio_oob(None);
+        assert!(html.contains(">--<"), "expected dashes, got: {}", html);
+    }
+
+    #[test]
+    fn test_compute_dashboard_metrics_uses_cache_prices_fallback() {
+        // The Solana client doesn't attach USD prices to its CachedBalance,
+        // so native_usd_value / total_usd_value are None. The dashboard
+        // metric must still derive a portfolio total from cache.prices,
+        // otherwise the card reads "--" right after a successful refresh.
+        use crate::services::cache::{BalanceCache, CachedBalance};
+        use crate::storage::{AddressBook, Chain, WalletAddress};
+
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "W",
+            CachedBalance {
+                name: "W".to_string(),
+                address_or_id: "addr".to_string(),
+                chain_or_service: "Solana".to_string(),
+                native_symbol: "SOL".to_string(),
+                native_balance: 4.0,
+                native_usd_value: None,
+                tokens: vec![],
+                total_usd_value: None,
+            },
+        );
+        cache.set_prices({
+            let mut m = std::collections::HashMap::new();
+            m.insert("SOL".to_string(), 75.0);
+            m
+        });
+        let mut book = AddressBook::new();
+        book.addresses.push(WalletAddress {
+            name: "W".to_string(),
+            company: String::new(),
+            address: "addr".to_string(),
+            chain: Chain::Solana,
+        });
+
+        let (total, _) = compute_dashboard_metrics(&book, &cache);
+        assert_eq!(total, Some(300.0));
+    }
+
+    fn cb(
+        name: &str,
+        chain: &str,
+        sym: &str,
+        bal: f64,
+        usd: Option<f64>,
+        tokens: Vec<CachedToken>,
+    ) -> CachedBalance {
+        let total = match (usd, tokens.iter().filter_map(|t| t.usd_value).sum::<f64>()) {
+            (Some(n), t) => Some(n + t),
+            (None, t) if t > 0.0 => Some(t),
+            _ => None,
+        };
+        CachedBalance {
+            name: name.to_string(),
+            address_or_id: format!("addr_{}", name),
+            chain_or_service: chain.to_string(),
+            native_symbol: sym.to_string(),
+            native_balance: bal,
+            native_usd_value: usd,
+            tokens,
+            total_usd_value: total,
+        }
+    }
+
+    fn wa(name: &str, chain: crate::storage::Chain) -> crate::storage::WalletAddress {
+        crate::storage::WalletAddress {
+            name: name.to_string(),
+            company: String::new(),
+            address: format!("addr_{}", name),
+            chain,
+        }
+    }
+
+    #[test]
+    fn test_aggregate_crypto_holdings_empty_returns_empty() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::AddressBook;
+        let book = AddressBook::new();
+        let cache = BalanceCache::new();
+        assert!(aggregate_crypto_holdings(&book, &cache).is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_crypto_holdings_sums_native_across_wallets() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let mut cache = BalanceCache::new();
+        cache.set_balance("W1", cb("W1", "Solana", "SOL", 5.0, Some(500.0), vec![]));
+        cache.set_balance("W2", cb("W2", "Solana", "SOL", 3.0, Some(300.0), vec![]));
+        let mut book = AddressBook::new();
+        book.addresses.push(wa("W1", Chain::Solana));
+        book.addresses.push(wa("W2", Chain::Solana));
+
+        let rows = aggregate_crypto_holdings(&book, &cache);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "SOL");
+        assert_eq!(rows[0].balance, 8.0);
+        assert_eq!(rows[0].usd_value, Some(800.0));
+        assert_eq!(rows[0].price, Some(100.0));
+        assert_eq!(rows[0].chains, vec!["Solana".to_string()]);
+    }
+
+    #[test]
+    fn test_aggregate_crypto_holdings_combines_same_symbol_cross_chain() {
+        // USDC on Ethereum + USDC on Polygon collapse into a single row,
+        // and the chain list captures both.
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "Eth",
+            cb(
+                "Eth",
+                "Ethereum",
+                "ETH",
+                1.0,
+                Some(2000.0),
+                vec![CachedToken {
+                    symbol: "USDC".to_string(),
+                    balance: 100.0,
+                    usd_value: Some(100.0),
+                }],
+            ),
+        );
+        cache.set_balance(
+            "Poly",
+            cb(
+                "Poly",
+                "Polygon",
+                "MATIC",
+                10.0,
+                Some(5.0),
+                vec![CachedToken {
+                    symbol: "USDC".to_string(),
+                    balance: 250.0,
+                    usd_value: Some(250.0),
+                }],
+            ),
+        );
+        let mut book = AddressBook::new();
+        book.addresses.push(wa("Eth", Chain::Ethereum));
+        book.addresses.push(wa("Poly", Chain::Polygon));
+
+        let rows = aggregate_crypto_holdings(&book, &cache);
+        let usdc = rows.iter().find(|r| r.symbol == "USDC").expect("USDC row");
+        assert_eq!(usdc.balance, 350.0);
+        assert_eq!(usdc.usd_value, Some(350.0));
+        assert_eq!(
+            usdc.chains,
+            vec!["Ethereum".to_string(), "Polygon".to_string()]
+        );
+
+        // Ordering by USD desc: ETH ($2000) > USDC ($350) > MATIC ($5)
+        let symbols: Vec<&str> = rows.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["ETH", "USDC", "MATIC"]);
+    }
+
+    #[test]
+    fn test_aggregate_crypto_holdings_excludes_orphan_and_banking_entries() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "Active",
+            cb("Active", "Solana", "SOL", 1.0, Some(100.0), vec![]),
+        );
+        cache.set_balance(
+            "OrphanWallet",
+            cb("OrphanWallet", "Solana", "SOL", 99.0, Some(9900.0), vec![]),
+        );
+        cache.set_balance(
+            "BankAcc",
+            cb(
+                "BankAcc",
+                "Mercury Banking",
+                "USD",
+                500.0,
+                Some(500.0),
+                vec![],
+            ),
+        );
+        let mut book = AddressBook::new();
+        book.addresses.push(wa("Active", Chain::Solana));
+        // BankAcc lives only in banking_accounts, never in addresses.
+        book.banking_accounts.push(crate::storage::BankingAccount {
+            name: "BankAcc".to_string(),
+            company: String::new(),
+            account_id: "acc".to_string(),
+            service: crate::storage::BankingService::Mercury,
+        });
+
+        let rows = aggregate_crypto_holdings(&book, &cache);
+        // Orphan must not contribute, banking must not contribute.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].balance, 1.0);
+        assert_eq!(rows[0].usd_value, Some(100.0));
+    }
+
+    #[test]
+    fn test_aggregate_crypto_holdings_handles_missing_prices() {
+        // Wallet with native balance but no USD price: row appears, usd
+        // and price are None, sorts after priced rows.
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "Priced",
+            cb("Priced", "Solana", "SOL", 1.0, Some(100.0), vec![]),
+        );
+        cache.set_balance(
+            "Unpriced",
+            cb("Unpriced", "Aptos", "APT", 50.0, None, vec![]),
+        );
+        let mut book = AddressBook::new();
+        book.addresses.push(wa("Priced", Chain::Solana));
+        book.addresses.push(wa("Unpriced", Chain::Aptos));
+
+        let rows = aggregate_crypto_holdings(&book, &cache);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].symbol, "SOL");
+        assert_eq!(rows[1].symbol, "APT");
+        assert_eq!(rows[1].usd_value, None);
+        assert_eq!(rows[1].price, None);
+    }
+
+    #[test]
+    fn test_aggregate_crypto_holdings_uses_global_price_when_per_wallet_missing() {
+        // Cached SOL balance has no native_usd_value (chain client didn't
+        // attach prices), but the global price cache has a SOL quote. The
+        // aggregator should derive Value = balance * price.
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let mut cache = BalanceCache::new();
+        cache.set_balance("W", cb("W", "Solana", "SOL", 2.0, None, vec![]));
+        cache.set_prices({
+            let mut m = std::collections::HashMap::new();
+            m.insert("SOL".to_string(), 92.0);
+            m
+        });
+        let mut book = AddressBook::new();
+        book.addresses.push(wa("W", Chain::Solana));
+
+        let rows = aggregate_crypto_holdings(&book, &cache);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "SOL");
+        assert_eq!(rows[0].balance, 2.0);
+        assert_eq!(rows[0].usd_value, Some(184.0));
+        assert_eq!(rows[0].price, Some(92.0));
+    }
+
+    #[test]
+    fn test_aggregate_cash_holdings_returns_per_account_rows() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, BankingAccount, BankingService};
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "Mercury Main",
+            cb(
+                "Mercury Main",
+                "Mercury Banking",
+                "USD",
+                12000.0,
+                Some(12000.0),
+                vec![],
+            ),
+        );
+        cache.set_balance(
+            "Circle Ops",
+            cb("Circle Ops", "Circle", "USD", 300.0, Some(300.0), vec![]),
+        );
+        let mut book = AddressBook::new();
+        book.banking_accounts.push(BankingAccount {
+            name: "Mercury Main".to_string(),
+            company: String::new(),
+            account_id: "m1".to_string(),
+            service: BankingService::Mercury,
+        });
+        book.banking_accounts.push(BankingAccount {
+            name: "Circle Ops".to_string(),
+            company: String::new(),
+            account_id: "c1".to_string(),
+            service: BankingService::Circle,
+        });
+
+        let rows = aggregate_cash_holdings(&book, &cache);
+        assert_eq!(rows.len(), 2);
+        // Sorted by USD desc.
+        assert_eq!(rows[0].name, "Mercury Main");
+        assert_eq!(rows[0].balance, 12000.0);
+        assert_eq!(rows[0].currency, "USD");
+        assert_eq!(rows[1].name, "Circle Ops");
+    }
+
+    #[test]
+    fn test_aggregated_holdings_tsv_includes_assets_and_cash() {
+        let assets = vec![
+            AssetAggregate {
+                symbol: "SOL".to_string(),
+                balance: 1.5,
+                usd_value: Some(150.0),
+                price: Some(100.0),
+                chains: vec!["Solana".to_string()],
+            },
+            AssetAggregate {
+                symbol: "USDC".to_string(),
+                balance: 100.0,
+                usd_value: Some(100.0),
+                price: Some(1.0),
+                chains: vec!["Base".to_string(), "Solana".to_string()],
+            },
+        ];
+        let cash = vec![CashRow {
+            name: "Mercury Main".to_string(),
+            service: "Mercury Banking".to_string(),
+            currency: "USD".to_string(),
+            balance: 5000.0,
+            usd_value: Some(5000.0),
+        }];
+        let tsv = aggregated_holdings_tsv(&assets, &cash);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines[0], "Symbol\tChains\tBalance\tPrice\tUSD Value");
+        assert_eq!(lines[1], "SOL\tSolana\t1.500000\t100.00\t150.00");
+        assert_eq!(lines[2], "USDC\tBase, Solana\t100.000000\t1.00\t100.00");
+        assert_eq!(
+            lines[3],
+            "Mercury Main (USD)\tMercury Banking\t5000.00\t\t5000.00"
+        );
+    }
+
+    #[test]
+    fn test_aggregated_holdings_tsv_handles_unpriced_asset() {
+        let assets = vec![AssetAggregate {
+            symbol: "RAT".to_string(),
+            balance: 1000.0,
+            usd_value: None,
+            price: None,
+            chains: vec!["Solana".to_string()],
+        }];
+        let tsv = aggregated_holdings_tsv(&assets, &[]);
+        let lines: Vec<&str> = tsv.lines().collect();
+        // Empty Price and USD Value cells; trailing tabs preserved.
+        assert_eq!(lines[1], "RAT\tSolana\t1000.000000\t\t");
+    }
+
+    #[test]
+    fn test_per_wallet_tsv_emits_native_and_tokens_with_price_fallback() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "WalletA",
+            cb(
+                "WalletA",
+                "Solana",
+                "SOL",
+                2.0,
+                None, // no per-wallet USD; rely on fallback
+                vec![CachedToken {
+                    symbol: "USDC".to_string(),
+                    balance: 50.0,
+                    usd_value: Some(50.0),
+                }],
+            ),
+        );
+        cache.set_prices({
+            let mut m = std::collections::HashMap::new();
+            m.insert("SOL".to_string(), 100.0);
+            m
+        });
+        let mut book = AddressBook::new();
+        book.addresses.push(crate::storage::WalletAddress {
+            name: "WalletA".to_string(),
+            company: "Acme".to_string(),
+            address: "addr".to_string(),
+            chain: Chain::Solana,
+        });
+
+        let tsv = per_wallet_tsv(&book, &cache);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Company\tWallet\tChain\tSymbol\tAmount\tUSD Value"
+        );
+        // Native row uses the price fallback (2 SOL * $100).
+        assert_eq!(lines[1], "Acme\tWalletA\tSolana\tSOL\t2.000000\t200.00");
+        assert_eq!(lines[2], "Acme\tWalletA\tSolana\tUSDC\t50.000000\t50.00");
+    }
+
+    #[test]
+    fn test_per_account_tsv_emits_one_row_per_account() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, BankingAccount, BankingService};
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "Mercury Main",
+            cb(
+                "Mercury Main",
+                "Mercury Banking",
+                "USD",
+                12000.0,
+                Some(12000.0),
+                vec![],
+            ),
+        );
+        let mut book = AddressBook::new();
+        book.banking_accounts.push(BankingAccount {
+            name: "Mercury Main".to_string(),
+            company: String::new(),
+            account_id: "m1".to_string(),
+            service: BankingService::Mercury,
+        });
+
+        let tsv = per_account_tsv(&book, &cache);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Company\tAccount\tService\tCurrency\tBalance\tUSD Value"
+        );
+        assert_eq!(
+            lines[1],
+            "Uncategorized\tMercury Main\tMercury Banking\tUSD\t12000.00\t12000.00"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_cash_holdings_skips_uncached_accounts() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, BankingAccount, BankingService};
+        let cache = BalanceCache::new();
+        let mut book = AddressBook::new();
+        book.banking_accounts.push(BankingAccount {
+            name: "NeverFetched".to_string(),
+            company: String::new(),
+            account_id: "x".to_string(),
+            service: BankingService::Mercury,
+        });
+        assert!(aggregate_cash_holdings(&book, &cache).is_empty());
     }
 }

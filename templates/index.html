@@ -91,6 +91,10 @@
     <div class="card-header">
         <span class="card-title">Holdings</span>
         <div class="header-actions">
+            <button id="copy-tsv-btn" class="btn btn-secondary btn-sm" data-tsv="{{ tsv_export }}" title="Copy as TSV (paste into a spreadsheet)">
+                <i data-lucide="clipboard"></i>
+                <span class="btn-text">Copy TSV</span>
+            </button>
             <button id="query-btn" class="btn btn-secondary btn-sm"
                     hx-get="/balances"
                     hx-target="#holdings-content"
@@ -115,7 +119,13 @@
             </p>
             <p class="text-muted" style="margin-top: 8px;">Add a wallet or bank account to get started</p>
         </div>
+        {% else if filter == "all" %}
+        {# Aggregated holdings: one row per asset symbol, summed across wallets. #}
+        {# Per-wallet management actions live on the Wallets and Transactions pages. #}
+        {% include "holdings_table.html" %}
         {% else %}
+        {# filter == "wallets" or "banking": keep the per-account view so #}
+        {# Query / Txns / Delete remain reachable. #}
         <table class="data-table">
             <thead>
                 <tr>
@@ -249,6 +259,7 @@
         </table>
         {% endif %}
     </div>
+
 </div>
 
 <!-- Balances Result Area -->
@@ -326,6 +337,21 @@
         background: transparent;
         border: none;
         padding: 0;
+    }
+
+    .holdings-section .asset-icon {
+        font-size: 11px;
+        letter-spacing: -0.5px;
+    }
+
+    .holdings-section .chain-badge + .chain-badge {
+        margin-left: 4px;
+    }
+
+    .cash-section-header {
+        padding: 16px 20px;
+        border-top: 1px solid var(--border-subtle);
+        background: #0D0D0E;
     }
 
     .row-actions {
