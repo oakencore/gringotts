@@ -255,7 +255,6 @@ impl SharedCache {
     }
 
     /// Re-key a cached balance after an account rename, then persist.
-    #[allow(dead_code)]
     pub async fn rename_balance(&self, old_name: &str, new_name: &str) -> Result<()> {
         {
             let mut cache = self.inner.write().await;

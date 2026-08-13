@@ -304,7 +304,6 @@ impl AddressBook {
     /// first, mirroring the web UI's delete handler). Trims the new name and
     /// returns the trimmed value so callers can re-key derived state (the
     /// balance cache) with exactly what was stored.
-    #[allow(dead_code)]
     pub fn rename_account(
         &mut self,
         old_name: &str,

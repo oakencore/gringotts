@@ -10,7 +10,7 @@ use crate::chains::sui::SuiClient;
 use crate::chains::{aptos, evm, near, solana, starknet, sui};
 use crate::services::cache::{CachedBalance, CachedToken, SharedCache};
 use crate::services::price::PriceService;
-use crate::storage::{AddressBook, BankingService, Chain};
+use crate::storage::{AddressBook, BankingService, Chain, RenameError};
 
 use askama::Template;
 use axum::{
@@ -997,7 +997,10 @@ pub async fn start_server(
         .route("/settings/refresh-interval", post(update_refresh_interval))
         .route("/transactions", get(global_transactions))
         .route("/accounts", post(add_account))
-        .route("/accounts/:name", delete(remove_account))
+        .route(
+            "/accounts/:name",
+            delete(remove_account).patch(rename_account),
+        )
         .route("/balances", get(query_balances))
         .route("/balances/:name", get(query_single_balance))
         .route("/transactions/:name", get(get_transactions))
@@ -2901,6 +2904,54 @@ async fn remove_account(Path(name): Path<String>) -> impl IntoResponse {
 
     // Return empty to remove the row
     (StatusCode::OK, Html(String::new()))
+}
+
+#[derive(Deserialize)]
+struct RenameForm {
+    new_name: String,
+}
+
+async fn rename_account(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Form(form): Form<RenameForm>,
+) -> Response {
+    let mut book = match AddressBook::load() {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response()
+        }
+    };
+
+    let new_name = match book.rename_account(&name, &form.new_name) {
+        Ok(n) => n,
+        Err(e) => {
+            let status = match e {
+                RenameError::EmptyName => StatusCode::UNPROCESSABLE_ENTITY,
+                RenameError::NameTaken => StatusCode::CONFLICT,
+                RenameError::NotFound => StatusCode::NOT_FOUND,
+            };
+            return (status, e.to_string()).into_response();
+        }
+    };
+
+    if let Err(e) = book.save() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response();
+    }
+
+    // Address book is saved; re-key the cached balance so the dashboard keeps
+    // showing it under the new name. If this fails the entry is refetched
+    // under the new name on the next refresh - degraded, not broken.
+    if let Err(e) = state.cache.rename_balance(&name, &new_name).await {
+        eprintln!(
+            "Warning: failed to re-key cached balance after rename: {}",
+            e
+        );
+    }
+
+    // The name is baked into row ids, hx-targets, and detail ids across the
+    // page, so a full refresh is the only swap that stays consistent.
+    (StatusCode::OK, [("HX-Refresh", "true")], String::new()).into_response()
 }
 
 async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse {
