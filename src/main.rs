@@ -38,8 +38,12 @@ async fn main() -> Result<()> {
         Commands::Remove { identifier } => {
             remove_address(identifier)?;
         }
-        Commands::Query { rpc_url, no_prices } => {
-            query::query_all(rpc_url, no_prices).await?;
+        Commands::Query {
+            rpc_url,
+            no_prices,
+            snapshot,
+        } => {
+            query::query_all(rpc_url, no_prices, snapshot).await?;
         }
         Commands::QueryOne {
             name,
@@ -55,7 +59,21 @@ async fn main() -> Result<()> {
             service,
         } => {
             let banking_service = BankingService::from_str(&service)?;
+            let account_id = match (account_id, &banking_service) {
+                (Some(id), _) => id,
+                (None, BankingService::Manual) => String::new(),
+                (None, other) => anyhow::bail!(
+                    "--account-id is required for {} accounts",
+                    other.display_name()
+                ),
+            };
             add_banking_account(company, name, account_id, banking_service)?;
+        }
+        Commands::SetBalance { name, amount } => {
+            let mut book = AddressBook::load()?;
+            book.set_manual_balance(&name, amount)?;
+            book.save()?;
+            ui::render_success(&format!("Balance for '{}' set to ${:.2}", name, amount));
         }
         Commands::SetupMercury { company } => {
             setup_mercury_accounts(company).await?;
@@ -80,6 +98,13 @@ async fn main() -> Result<()> {
             output,
         } => {
             query::export_transactions(name, format, start, end, output).await?;
+        }
+        Commands::ExportBalances {
+            format,
+            output,
+            no_prices,
+        } => {
+            query::export_balances(format, output, no_prices).await?;
         }
         Commands::Serve {
             port,
@@ -174,6 +199,11 @@ fn list_addresses(company_filter: Option<String>) -> Result<()> {
 }
 
 fn remove_address(identifier: String) -> Result<()> {
+    if identifier.is_empty() {
+        ui::render_error("Identifier cannot be empty");
+        return Ok(());
+    }
+
     let mut book = AddressBook::load()?;
 
     // Try to remove by name first
@@ -218,6 +248,7 @@ fn add_banking_account(
         name,
         account_id,
         service,
+        manual_balance: None,
     };
 
     book.banking_accounts.push(account);
@@ -260,6 +291,7 @@ async fn setup_mercury_accounts(company: String) -> Result<()> {
             name: account.name.clone(),
             account_id: account.id.clone(),
             service: BankingService::Mercury,
+            manual_balance: None,
         };
 
         book.banking_accounts.push(banking_account);

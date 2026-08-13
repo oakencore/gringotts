@@ -5,11 +5,13 @@ Multi-chain cryptocurrency portfolio tracker with banking integration. Track bal
 ## Features
 
 - **Multi-chain support**: Solana, Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Avalanche, Core, NEAR, Aptos, Sui, Starknet
-- **Banking integration**: Mercury, Circle
+- **Supply context**: Solana token balances in terminal query output show the holder's percentage of total supply (when >= 0.01%)
+- **Banking integration**: Mercury, Circle, manual accounts (hand-entered balances)
 - **Real-time pricing**: USD values via Switchboard Surge
 - **Portfolio aggregation**: Group assets by company/organization
 - **Web interface**: HTMX-powered dashboard
 - **Transaction export**: CSV/JSON export for banking transactions
+- **Balance export**: CSV/JSON snapshot of all current balances
 - **Auto-detection**: Automatically detects chain from address format
 - **Premium RPC support**: Auto-detects Helius (Solana) and Alchemy (EVM) API keys
 
@@ -147,6 +149,12 @@ gringotts add-bank --name "Operating" --account-id <mercury-account-id> --servic
 # Add Circle account
 gringotts add-bank --name "Circle USD" --account-id <circle-account-id> --service circle
 
+# Add a manual account (banks/exchanges without API access, no account ID needed)
+gringotts add-bank --name "Altitude" --service manual --company "CompanyName"
+
+# Set or update its USD balance (displayed with an "as of" date)
+gringotts set-balance "Altitude" 12500.00
+
 # Query all balances (includes all banking accounts)
 gringotts query
 
@@ -173,6 +181,21 @@ gringotts export-transactions "Operating Account" --start 2025-01-01 --end 2025-
 
 # Export to file
 gringotts export-transactions "Operating Account" --output transactions.csv
+```
+
+#### Balance Export
+
+Export current balances for every tracked address and account to CSV or JSON. Each row is one asset: company, account, chain or service, symbol, amount, USD price, USD value, and an as-of timestamp. Progress output goes to stderr, so stdout is safe to pipe.
+
+```bash
+# Export to CSV on stdout (default)
+gringotts export-balances
+
+# Export to JSON
+gringotts export-balances --format json
+
+# Export to a file, skipping price lookups
+gringotts export-balances --output balances.csv --no-prices
 ```
 
 ### Organisation
@@ -283,10 +306,15 @@ gringotts query --no-prices
 
 # Useful for quick balance checks or when price service is down
 gringotts query-one "Wallet" --no-prices
+
+# Query all balances and save a dated JSON snapshot
+gringotts query --snapshot
 ```
 ## Storage
 
 Addresses and banking accounts are stored in: `~/.gringotts/addresses.json`
+
+Portfolio snapshots are written to: `~/.gringotts/snapshots/<timestamp>.json`
 
 ## Architecture
 

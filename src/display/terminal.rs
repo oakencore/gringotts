@@ -1,7 +1,14 @@
 use crate::banking::{circle, mercury};
 use crate::chains::{aptos, evm, near, solana, starknet, sui};
-use crate::storage::{BankingAccount, BankingService, Chain, WalletAddress};
+use crate::storage::{BankingService, Chain};
 use crate::types::FetchFailure;
+
+fn supply_suffix(token: &solana::TokenBalance) -> String {
+    match token.supply_percent {
+        Some(p) if p >= 0.01 => format!(" ({:.2}% of supply)", p),
+        _ => String::new(),
+    }
+}
 
 fn format_usd(value: f64) -> String {
     let formatted = format!("{:.2}", value);
@@ -31,185 +38,6 @@ fn format_usd(value: f64) -> String {
         result.chars().rev().collect::<String>(),
         decimal_part
     )
-}
-
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len <= 3 {
-        s.chars().take(max_len).collect()
-    } else {
-        let prefix_len = (max_len - 3) / 2;
-        let suffix_len = max_len - 3 - prefix_len;
-        format!(
-            "{}...{}",
-            s.chars().take(prefix_len).collect::<String>(),
-            s.chars()
-                .skip(s.chars().count() - suffix_len)
-                .collect::<String>()
-        )
-    }
-}
-
-pub fn render_addresses(addresses: &[WalletAddress], banking_accounts: &[BankingAccount]) {
-    if addresses.is_empty() && banking_accounts.is_empty() {
-        println!("\nNo addresses or accounts tracked yet.");
-        println!("Use 'gringotts add' to add blockchain addresses.");
-        println!("Use 'gringotts add-bank' to add banking accounts.\n");
-        return;
-    }
-
-    // Get terminal width, default to 120 if detection fails
-    let term_width = if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
-        w as usize
-    } else {
-        120
-    };
-
-    // Calculate column widths based on terminal size
-    // Minimum: 10 chars for borders and separators (│ X │ X │ X │ X │ X │)
-    let available_width = term_width.saturating_sub(10);
-
-    // Set minimum widths for each column
-    let min_company = 8;
-    let min_name = 15;
-    let min_address = 20;
-    let min_type = 8;
-    let min_chain = 10;
-    let min_total = min_company + min_name + min_address + min_type + min_chain;
-
-    let (company_width, name_width, address_width, type_width, chain_width) =
-        if available_width < min_total {
-            // If terminal is too small, use minimum widths
-            (min_company, min_name, min_address, min_type, min_chain)
-        } else {
-            // Distribute extra space proportionally
-            let extra = available_width - min_total;
-            // Give more space to Name and Address columns
-            let company_w = min_company + extra / 10;
-            let name_w = min_name + (extra * 3) / 10;
-            let address_w = min_address + (extra * 4) / 10;
-            let type_w = min_type + extra / 10;
-            let chain_w = min_chain + extra / 10;
-            (company_w, name_w, address_w, type_w, chain_w)
-        };
-
-    let table_width = company_width + name_width + address_width + type_width + chain_width + 10;
-
-    // Print header
-    println!("\n╭{}╗", "─".repeat(table_width - 2));
-    let title = "TRACKED ADDRESSES & ACCOUNTS";
-    let title_padding = (table_width - 2 - title.len()) / 2;
-    println!(
-        "│{}{:^width$}{}│",
-        " ".repeat(title_padding),
-        title,
-        " ".repeat(table_width - 2 - title_padding - title.len()),
-        width = title.len()
-    );
-    println!(
-        "├{}┬{}┬{}┬{}┬{}┤",
-        "─".repeat(company_width),
-        "─".repeat(name_width),
-        "─".repeat(address_width),
-        "─".repeat(type_width),
-        "─".repeat(chain_width)
-    );
-
-    // Print column headers
-    println!(
-        "│{:^cw$}│{:^nw$}│{:^aw$}│{:^tw$}│{:^chw$}│",
-        "Company",
-        "Name",
-        "Address/ID",
-        "Type",
-        "Chain/Service",
-        cw = company_width,
-        nw = name_width,
-        aw = address_width,
-        tw = type_width,
-        chw = chain_width
-    );
-    println!(
-        "├{}┼{}┼{}┼{}┼{}┤",
-        "─".repeat(company_width),
-        "─".repeat(name_width),
-        "─".repeat(address_width),
-        "─".repeat(type_width),
-        "─".repeat(chain_width)
-    );
-
-    // Print crypto addresses
-    for addr in addresses {
-        let display_company = if addr.company.is_empty() {
-            "-".to_string()
-        } else {
-            truncate_string(&addr.company, company_width)
-        };
-        let display_name = truncate_string(&addr.name, name_width);
-        let display_addr = truncate_string(&addr.address, address_width);
-        let display_type = "Crypto".to_string();
-        let display_chain = truncate_string(addr.chain.display_name(), chain_width);
-
-        println!(
-            "│{:<cw$}│{:<nw$}│{:<aw$}│{:<tw$}│{:<chw$}│",
-            display_company,
-            display_name,
-            display_addr,
-            display_type,
-            display_chain,
-            cw = company_width,
-            nw = name_width,
-            aw = address_width,
-            tw = type_width,
-            chw = chain_width
-        );
-    }
-
-    // Print banking accounts
-    for account in banking_accounts {
-        let display_company = if account.company.is_empty() {
-            "-".to_string()
-        } else {
-            truncate_string(&account.company, company_width)
-        };
-        let display_name = truncate_string(&account.name, name_width);
-        let display_id = truncate_string(&account.account_id, address_width);
-        let display_type = "Banking".to_string();
-        let display_service = truncate_string(account.service.display_name(), chain_width);
-
-        println!(
-            "│{:<cw$}│{:<nw$}│{:<aw$}│{:<tw$}│{:<chw$}│",
-            display_company,
-            display_name,
-            display_id,
-            display_type,
-            display_service,
-            cw = company_width,
-            nw = name_width,
-            aw = address_width,
-            tw = type_width,
-            chw = chain_width
-        );
-    }
-
-    // Print footer
-    println!(
-        "├{}┴{}┴{}┴{}┴{}┤",
-        "─".repeat(company_width),
-        "─".repeat(name_width),
-        "─".repeat(address_width),
-        "─".repeat(type_width),
-        "─".repeat(chain_width)
-    );
-    let footer = format!(
-        "Total: {} crypto address(es), {} banking account(s)",
-        addresses.len(),
-        banking_accounts.len()
-    );
-    let footer_padding = table_width - 2 - footer.len();
-    println!("│{}{}│", footer, " ".repeat(footer_padding));
-    println!("╰{}╯\n", "─".repeat(table_width - 2));
 }
 
 pub fn render_solana_balances(
@@ -275,7 +103,7 @@ pub fn render_solana_balances(
             };
             lines.push(mint_display);
 
-            let balance_str = if let Some(usd_value) = token.usd_value {
+            let mut balance_str = if let Some(usd_value) = token.usd_value {
                 if let Some(price) = token.usd_price {
                     format!(
                         "    Balance: {:.6} (${} @ ${:.6})",
@@ -293,6 +121,7 @@ pub fn render_solana_balances(
             } else {
                 format!("    Balance: {:.6}", token.ui_amount)
             };
+            balance_str.push_str(&supply_suffix(token));
             lines.push(balance_str);
             lines.push(format!("    Decimals: {}", token.decimals));
         }
@@ -933,6 +762,45 @@ pub fn render_circle_balances(
         println!("║  {:<width$} ║", line, width = box_width);
     }
 
+    println!("╚{}╝\n", "═".repeat(box_width + 2));
+}
+
+/// Renders a manual account: the hand-entered balance plus the date it was
+/// entered, so staleness is visible at a glance.
+pub fn render_manual_balance(account: &crate::storage::BankingAccount) {
+    const MIN_WIDTH: usize = 79;
+    let mut lines = Vec::new();
+
+    let display_company = if account.company.is_empty() {
+        "-"
+    } else {
+        &account.company
+    };
+    lines.push(format!("Company: {}", display_company));
+    lines.push(format!("Account: {}", account.name));
+    lines.push(format!("Service: {}", account.service.display_name()));
+
+    match (&account.manual_balance, account.manual_as_of()) {
+        (Some(manual), Some(as_of)) => lines.push(format!(
+            "Balance: ${} (as of {})",
+            format_usd(manual.amount),
+            as_of
+        )),
+        _ => lines.push(format!(
+            "Balance: not set - use 'gringotts set-balance \"{}\" <amount>'",
+            account.name
+        )),
+    }
+
+    let max_content_width = lines.iter().map(|l| l.len()).max().unwrap_or(MIN_WIDTH);
+    let box_width = max_content_width.max(MIN_WIDTH);
+
+    println!("\n╔{}╗", "═".repeat(box_width + 2));
+    for line in lines.iter().take(3) {
+        println!("║  {:<width$} ║", line, width = box_width);
+    }
+    println!("╠{}╣", "═".repeat(box_width + 2));
+    println!("║  {:<width$} ║", lines[3], width = box_width);
     println!("╚{}╝\n", "═".repeat(box_width + 2));
 }
 

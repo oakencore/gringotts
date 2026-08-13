@@ -22,18 +22,6 @@ impl<T> CacheEntry<T> {
             .as_secs();
         Self { data, timestamp }
     }
-
-    pub fn age_secs(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        now.saturating_sub(self.timestamp)
-    }
-
-    pub fn is_stale(&self, max_age_secs: u64) -> bool {
-        self.age_secs() > max_age_secs
-    }
 }
 
 /// Cached balance data for a wallet or account
@@ -54,12 +42,6 @@ pub struct CachedToken {
     pub symbol: String,
     pub balance: f64,
     pub usd_value: Option<f64>,
-}
-
-/// Cached price data
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedPrices {
-    pub prices: HashMap<String, f64>,
 }
 
 /// The main cache structure persisted to disk
@@ -151,17 +133,6 @@ impl BalanceCache {
         self.balances.retain(|name, _| names.contains(name));
     }
 
-    /// Get a cached balance if not stale
-    pub fn get_balance(&self, name: &str, max_age_secs: u64) -> Option<&CachedBalance> {
-        self.balances.get(name).and_then(|entry| {
-            if entry.is_stale(max_age_secs) {
-                None
-            } else {
-                Some(&entry.data)
-            }
-        })
-    }
-
     /// Return the cached balance regardless of age. Used by surfaces
     /// (like the dashboard) that prefer to render stale data over
     /// rendering nothing, signaling freshness via a separate timestamp.
@@ -172,15 +143,6 @@ impl BalanceCache {
     /// Update prices
     pub fn set_prices(&mut self, prices: HashMap<String, f64>) {
         self.prices = CacheEntry::new(prices);
-    }
-
-    /// Get cached prices if not stale
-    pub fn get_prices(&self, max_age_secs: u64) -> Option<&HashMap<String, f64>> {
-        if self.prices.is_stale(max_age_secs) {
-            None
-        } else {
-            Some(&self.prices.data)
-        }
     }
 
     /// Mark a full refresh
@@ -238,11 +200,6 @@ impl SharedCache {
     /// Get read access to the cache
     pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, BalanceCache> {
         self.inner.read().await
-    }
-
-    /// Get write access to the cache
-    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, BalanceCache> {
-        self.inner.write().await
     }
 
     /// Save the cache to disk
@@ -308,27 +265,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cache_entry_age() {
-        let entry = CacheEntry::new("test data");
-        assert!(entry.age_secs() < 2);
-        assert!(!entry.is_stale(10));
-    }
-
-    #[test]
-    fn test_cache_entry_staleness() {
-        let mut entry = CacheEntry::new("test data");
-        // Manually set old timestamp
-        entry.timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 100;
-
-        assert!(entry.is_stale(60));
-        assert!(!entry.is_stale(120));
-    }
-
-    #[test]
     fn test_balance_cache_operations() {
         let mut cache = BalanceCache::new();
 
@@ -345,17 +281,11 @@ mod tests {
 
         cache.set_balance("Test Wallet", balance.clone());
 
-        // Should retrieve when not stale
-        let retrieved = cache.get_balance("Test Wallet", 3600);
+        let retrieved = cache.get_balance_unchecked("Test Wallet");
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().native_balance, 10.0);
 
-        // Manually make the entry stale by backdating the timestamp
-        if let Some(entry) = cache.balances.get_mut("Test Wallet") {
-            entry.timestamp = entry.timestamp.saturating_sub(100); // 100 seconds old
-        }
-        let stale = cache.get_balance("Test Wallet", 50); // 50 second max age
-        assert!(stale.is_none());
+        assert!(cache.get_balance_unchecked("Missing Wallet").is_none());
     }
 
     #[test]
@@ -368,9 +298,7 @@ mod tests {
 
         cache.set_prices(prices);
 
-        let retrieved = cache.get_prices(3600);
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().get("SOL"), Some(&100.0));
+        assert_eq!(cache.prices.data.get("SOL"), Some(&100.0));
     }
 
     #[test]
@@ -404,7 +332,7 @@ mod tests {
 
         cache.rename_balance("Old Name", "New Name");
 
-        assert!(cache.balances.get("Old Name").is_none());
+        assert!(!cache.balances.contains_key("Old Name"));
         let entry = cache.balances.get("New Name").expect("entry re-keyed");
         assert_eq!(entry.data.name, "New Name");
         assert_eq!(entry.data.native_balance, 10.0);
@@ -413,7 +341,7 @@ mod tests {
 
         // Renaming a missing key is a silent no-op.
         cache.rename_balance("Ghost", "Anything");
-        assert!(cache.balances.get("Anything").is_none());
+        assert!(!cache.balances.contains_key("Anything"));
     }
 
     #[test]
@@ -436,7 +364,7 @@ mod tests {
         keep.insert("Keep Me".to_string());
         cache.retain_names(&keep);
 
-        assert!(cache.balances.get("Orphan").is_none());
+        assert!(!cache.balances.contains_key("Orphan"));
         let kept = cache.balances.get("Keep Me").expect("kept entry survives");
         assert_eq!(kept.data.native_balance, 10.0);
     }

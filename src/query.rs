@@ -54,7 +54,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -75,7 +74,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -96,7 +94,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -117,7 +114,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -138,7 +134,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -166,7 +161,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -180,7 +174,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     ));
                     failures.push(FetchFailure {
                         name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
                         chain_or_service: wallet.chain.display_name().to_string(),
                         error: error_msg,
                     });
@@ -206,7 +199,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: account.name.clone(),
-                            address_or_id: account.account_id.clone(),
                             chain_or_service: account.service.display_name().to_string(),
                             error: error_msg,
                         });
@@ -220,7 +212,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     ));
                     failures.push(FetchFailure {
                         name: account.name.clone(),
-                        address_or_id: account.account_id.clone(),
                         chain_or_service: account.service.display_name().to_string(),
                         error: error_msg,
                     });
@@ -239,7 +230,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: account.name.clone(),
-                            address_or_id: account.account_id.clone(),
                             chain_or_service: account.service.display_name().to_string(),
                             error: error_msg,
                         });
@@ -253,12 +243,15 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     ));
                     failures.push(FetchFailure {
                         name: account.name.clone(),
-                        address_or_id: account.account_id.clone(),
                         chain_or_service: account.service.display_name().to_string(),
                         error: error_msg,
                     });
                 }
             },
+            BankingService::Manual => {
+                // Balance is stored locally, nothing to fetch.
+                all_balances.push(WalletBalances::Manual(account.clone()));
+            }
         }
         pb.inc(1);
     }
@@ -277,7 +270,8 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
             success_count
         ));
     }
-    println!();
+    // stderr: stdout is the data channel for export-balances
+    eprintln!();
 
     FetchAllResult {
         balances: all_balances,
@@ -319,7 +313,9 @@ pub fn extract_token_symbols(all_balances: &[WalletBalances]) -> HashSet<String>
             WalletBalances::Starknet(_, _) => {
                 symbols.insert("ETH".to_string());
             }
-            WalletBalances::Mercury(_, _) | WalletBalances::Circle(_, _) => {
+            WalletBalances::Mercury(_, _)
+            | WalletBalances::Circle(_, _)
+            | WalletBalances::Manual(_) => {
                 // Banking balances are already in USD/EUR, no price lookup needed
             }
         }
@@ -378,7 +374,7 @@ pub async fn fetch_prices_for_symbols(symbols: HashSet<String>) -> Result<PriceF
         price_pb.finish_with_message("⚠ Failed to fetch prices and no cache available");
         price_pb.println("Balances will be displayed without USD values.");
     }
-    println!();
+    eprintln!();
 
     Ok(PriceFetchResult {
         prices,
@@ -505,13 +501,29 @@ fn enrich_and_display_balances(
                     &balances,
                 );
             }
+            WalletBalances::Manual(account) => {
+                ui::render_manual_balance(&account);
+                let amount = account
+                    .manual_balance
+                    .as_ref()
+                    .map(|m| m.amount)
+                    .unwrap_or(0.0);
+                add_asset_to_portfolio(
+                    &mut portfolio,
+                    &account.company,
+                    &account.name,
+                    "USD",
+                    amount,
+                    Some(amount),
+                );
+            }
         }
     }
 
     portfolio
 }
 
-pub async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
+pub async fn query_all(rpc_url: Option<String>, no_prices: bool, snapshot: bool) -> Result<()> {
     let book = AddressBook::load()?;
 
     if book.addresses.is_empty() && book.banking_accounts.is_empty() {
@@ -559,7 +571,28 @@ pub async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
         ui::render_fetch_failures(&fetch_result.failures);
     }
 
+    if snapshot {
+        let path = write_snapshot(&portfolio)?;
+        println!("Snapshot written to {}", path.display());
+    }
+
     Ok(())
+}
+
+fn snapshot_filename(timestamp: &str) -> String {
+    format!("{}.json", timestamp.replace(':', "-"))
+}
+
+fn write_snapshot(portfolio: &PortfolioSummary) -> Result<std::path::PathBuf> {
+    let dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?
+        .join(".gringotts")
+        .join("snapshots");
+    std::fs::create_dir_all(&dir)?;
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let path = dir.join(snapshot_filename(&ts));
+    std::fs::write(&path, serde_json::to_string_pretty(portfolio)?)?;
+    Ok(path)
 }
 
 pub async fn query_one(identifier: String, rpc_url: Option<String>, no_prices: bool) -> Result<()> {
@@ -723,6 +756,7 @@ pub async fn query_one(identifier: String, rpc_url: Option<String>, no_prices: b
                     &account.service,
                 );
             }
+            BankingService::Manual => ui::render_manual_balance(account),
         }
 
         return Ok(());
@@ -1089,23 +1123,39 @@ pub async fn export_transactions(
                 "Transaction export not yet supported for Circle accounts"
             ));
         }
+        BankingService::Manual => {
+            return Err(anyhow::anyhow!(
+                "Transaction export not supported for manual accounts"
+            ));
+        }
     }
 
     Ok(())
+}
+
+fn escape_csv(s: &str) -> String {
+    let needs_formula_guard = match s.chars().next() {
+        Some('=') | Some('+') | Some('@') | Some('\t') => true,
+        Some('-') => s.parse::<f64>().is_err(),
+        _ => false,
+    };
+    let s = if needs_formula_guard {
+        format!("'{}", s)
+    } else {
+        s.to_string()
+    };
+
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s
+    }
 }
 
 fn export_mercury_transactions(
     transactions: &[mercury::Transaction],
     format: &str,
 ) -> Result<String> {
-    fn escape_csv(s: &str) -> String {
-        if s.contains(',') || s.contains('"') || s.contains('\n') {
-            format!("\"{}\"", s.replace('"', "\"\""))
-        } else {
-            s.to_string()
-        }
-    }
-
     let output_data = match format.to_lowercase().as_str() {
         "json" => serde_json::to_string_pretty(&transactions)?,
         _ => {
@@ -1148,10 +1198,311 @@ fn export_mercury_transactions(
     Ok(output_data)
 }
 
+/// One asset holding, flattened for export. One row per symbol per account.
+#[derive(serde::Serialize)]
+struct ExportRow {
+    company: String,
+    account: String,
+    chain_or_service: String,
+    symbol: String,
+    amount: f64,
+    usd_price: Option<f64>,
+    usd_value: Option<f64>,
+    as_of: String,
+}
+
+fn balances_to_rows(
+    all_balances: Vec<WalletBalances>,
+    price_cache: &HashMap<String, f64>,
+    as_of: &str,
+) -> Vec<ExportRow> {
+    let mut rows: Vec<ExportRow> = Vec::new();
+
+    // Zero-amount holdings are skipped, matching add_asset_to_portfolio.
+    let mut push = |company: &str,
+                    account: &str,
+                    chain_or_service: &str,
+                    symbol: &str,
+                    amount: f64,
+                    usd_price: Option<f64>,
+                    usd_value: Option<f64>,
+                    as_of: &str| {
+        if amount == 0.0 {
+            return;
+        }
+        rows.push(ExportRow {
+            company: company.to_string(),
+            account: account.to_string(),
+            chain_or_service: chain_or_service.to_string(),
+            symbol: symbol.to_string(),
+            amount,
+            usd_price,
+            usd_value,
+            as_of: as_of.to_string(),
+        });
+    };
+
+    for wallet_balance in all_balances {
+        match wallet_balance {
+            WalletBalances::Solana(wallet, mut balances) => {
+                balances.enrich_from_cache(price_cache);
+                let chain = wallet.chain.display_name();
+                push(
+                    &wallet.company,
+                    &wallet.name,
+                    chain,
+                    "SOL",
+                    balances.sol_balance,
+                    balances.sol_usd_price,
+                    balances.sol_usd_value,
+                    as_of,
+                );
+                for token in &balances.token_balances {
+                    if let Some(symbol) = &token.symbol {
+                        push(
+                            &wallet.company,
+                            &wallet.name,
+                            chain,
+                            symbol,
+                            token.ui_amount,
+                            token.usd_price,
+                            token.usd_value,
+                            as_of,
+                        );
+                    }
+                }
+            }
+            WalletBalances::Evm(wallet, mut balances) => {
+                balances.enrich_from_cache(price_cache);
+                let chain = wallet.chain.display_name();
+                push(
+                    &wallet.company,
+                    &wallet.name,
+                    chain,
+                    &balances.native_symbol,
+                    balances.eth_balance,
+                    balances.eth_usd_price,
+                    balances.eth_usd_value,
+                    as_of,
+                );
+                for token in &balances.token_balances {
+                    if let Some(symbol) = &token.symbol {
+                        push(
+                            &wallet.company,
+                            &wallet.name,
+                            chain,
+                            symbol,
+                            token.ui_amount,
+                            token.usd_price,
+                            token.usd_value,
+                            as_of,
+                        );
+                    }
+                }
+            }
+            WalletBalances::Near(wallet, mut balances) => {
+                balances.enrich_from_cache(price_cache);
+                push(
+                    &wallet.company,
+                    &wallet.name,
+                    wallet.chain.display_name(),
+                    "NEAR",
+                    balances.near_balance,
+                    balances.near_usd_price,
+                    balances.near_usd_value,
+                    as_of,
+                );
+            }
+            WalletBalances::Aptos(wallet, mut balances) => {
+                balances.enrich_from_cache(price_cache);
+                push(
+                    &wallet.company,
+                    &wallet.name,
+                    wallet.chain.display_name(),
+                    "APT",
+                    balances.apt_balance,
+                    balances.apt_usd_price,
+                    balances.apt_usd_value,
+                    as_of,
+                );
+            }
+            WalletBalances::Sui(wallet, mut balances) => {
+                balances.enrich_from_cache(price_cache);
+                push(
+                    &wallet.company,
+                    &wallet.name,
+                    wallet.chain.display_name(),
+                    "SUI",
+                    balances.sui_balance,
+                    balances.sui_usd_price,
+                    balances.sui_usd_value,
+                    as_of,
+                );
+            }
+            WalletBalances::Starknet(wallet, mut balances) => {
+                balances.enrich_from_cache(price_cache);
+                push(
+                    &wallet.company,
+                    &wallet.name,
+                    wallet.chain.display_name(),
+                    "ETH",
+                    balances.eth_balance,
+                    balances.eth_usd_price,
+                    balances.eth_usd_value,
+                    as_of,
+                );
+            }
+            WalletBalances::Mercury(account, balances) => {
+                push(
+                    &account.company,
+                    &account.name,
+                    account.service.display_name(),
+                    "USD",
+                    balances.current_balance,
+                    Some(1.0),
+                    Some(balances.current_balance),
+                    as_of,
+                );
+            }
+            WalletBalances::Circle(account, balances) => {
+                for balance in &balances.available_balances {
+                    // Non-USD currencies need conversion - don't assume 1:1 with USD
+                    let (price, value) = if balance.currency == "USD" {
+                        (Some(1.0), Some(balance.amount))
+                    } else {
+                        (None, None)
+                    };
+                    push(
+                        &account.company,
+                        &account.name,
+                        account.service.display_name(),
+                        &balance.currency,
+                        balance.amount,
+                        price,
+                        value,
+                        as_of,
+                    );
+                }
+            }
+            WalletBalances::Manual(account) => {
+                let amount = account
+                    .manual_balance
+                    .as_ref()
+                    .map(|m| m.amount)
+                    .unwrap_or(0.0);
+                // Manual balances carry their own as-of timestamp, not the run's.
+                let updated_at = account
+                    .manual_balance
+                    .as_ref()
+                    .map(|m| m.updated_at.as_str())
+                    .unwrap_or(as_of);
+                push(
+                    &account.company,
+                    &account.name,
+                    account.service.display_name(),
+                    "USD",
+                    amount,
+                    Some(1.0),
+                    Some(amount),
+                    updated_at,
+                );
+            }
+        }
+    }
+
+    rows
+}
+
+fn format_export_rows(rows: &[ExportRow], format: &str) -> Result<String> {
+    let output_data = match format.to_lowercase().as_str() {
+        "json" => format!("{}\n", serde_json::to_string_pretty(&rows)?),
+        _ => {
+            let opt = |v: Option<f64>| v.map(|v| format!("{}", v)).unwrap_or_default();
+            let mut csv_output = String::new();
+            csv_output.push_str(
+                "company,account,chain_or_service,symbol,amount,usd_price,usd_value,as_of\n",
+            );
+
+            for row in rows {
+                csv_output.push_str(&format!(
+                    "{},{},{},{},{},{},{},{}\n",
+                    escape_csv(&row.company),
+                    escape_csv(&row.account),
+                    escape_csv(&row.chain_or_service),
+                    escape_csv(&row.symbol),
+                    row.amount,
+                    opt(row.usd_price),
+                    opt(row.usd_value),
+                    escape_csv(&row.as_of)
+                ));
+            }
+            csv_output
+        }
+    };
+
+    Ok(output_data)
+}
+
+pub async fn export_balances(
+    format: String,
+    output: Option<String>,
+    no_prices: bool,
+) -> Result<()> {
+    let book = AddressBook::load()?;
+
+    // Progress and diagnostics go to stderr - stdout carries the export itself.
+    if book.addresses.is_empty() && book.banking_accounts.is_empty() {
+        eprintln!("No addresses or accounts tracked yet.");
+        eprintln!("Use 'gringotts add' to add blockchain addresses.");
+        eprintln!("Use 'gringotts add-bank' to add banking accounts.");
+        return Ok(());
+    }
+
+    let fetch_result = fetch_all_balances(&book, None).await;
+
+    let price_cache = if !no_prices {
+        let symbols = extract_token_symbols(&fetch_result.balances);
+        fetch_prices_for_symbols(symbols).await?.prices
+    } else {
+        HashMap::new()
+    };
+
+    let as_of = chrono::Utc::now().to_rfc3339();
+    let rows = balances_to_rows(fetch_result.balances, &price_cache, &as_of);
+    let output_data = format_export_rows(&rows, &format)?;
+
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &output_data)?;
+            eprintln!("Exported {} rows to {}", rows.len(), path);
+        }
+        None => {
+            // Already newline-terminated.
+            print!("{}", output_data);
+        }
+    }
+
+    if !fetch_result.failures.is_empty() {
+        eprintln!(
+            "Warning: {} accounts failed to fetch; export is partial",
+            fetch_result.failures.len()
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::Chain;
+
+    #[test]
+    fn test_snapshot_filename_replaces_colons() {
+        let name = snapshot_filename("2026-08-13T14:03:22Z");
+        assert_eq!(name, "2026-08-13T14-03-22Z.json");
+        assert!(!name.contains(':'));
+    }
 
     #[test]
     fn test_extract_token_symbols_empty() {
@@ -1186,6 +1537,7 @@ mod tests {
             ui_amount: 100.0,
             usd_price: None,
             usd_value: None,
+            supply_percent: None,
         });
 
         let wallet_balances = vec![WalletBalances::Solana(wallet, balances)];
@@ -1238,5 +1590,111 @@ mod tests {
         assert!(symbols.contains("SOL"));
         assert!(symbols.contains("ETH"));
         assert_eq!(symbols.len(), 2);
+    }
+
+    #[test]
+    fn test_escape_csv() {
+        assert_eq!(escape_csv("plain"), "plain");
+        assert_eq!(escape_csv("a,b"), "\"a,b\"");
+        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(escape_csv("two\nlines"), "\"two\nlines\"");
+
+        // Formula injection guards
+        assert_eq!(
+            escape_csv("=HYPERLINK(\"evil\")"),
+            "\"'=HYPERLINK(\"\"evil\"\")\""
+        );
+        assert_eq!(escape_csv("+1234"), "'+1234");
+        assert_eq!(escape_csv("@SUM(A1:A2)"), "'@SUM(A1:A2)");
+        assert_eq!(escape_csv("\tcmd"), "'\tcmd");
+
+        // Negative numbers pass through unmangled
+        assert_eq!(escape_csv("-123.45"), "-123.45");
+        assert_eq!(escape_csv("-42"), "-42");
+
+        // Non-numeric field starting with '-' gets prefixed
+        assert_eq!(escape_csv("-cmd|calc"), "'-cmd|calc");
+    }
+
+    #[test]
+    fn test_balances_to_rows_solana() {
+        let wallet = WalletAddress {
+            company: "Test".to_string(),
+            name: "Test Wallet".to_string(),
+            address: "test123".to_string(),
+            chain: Chain::Solana,
+        };
+
+        let balances = solana::AccountBalances {
+            sol_balance: 2.0,
+            sol_usd_price: None,
+            sol_usd_value: None,
+            token_balances: vec![
+                solana::TokenBalance {
+                    mint: "usdc_mint".to_string(),
+                    symbol: Some("USDC".to_string()),
+                    name: Some("USD Coin".to_string()),
+                    decimals: 6,
+                    ui_amount: 100.0,
+                    usd_price: None,
+                    usd_value: None,
+                    supply_percent: None,
+                },
+                // Zero-amount holdings are dropped from the export
+                solana::TokenBalance {
+                    mint: "dust_mint".to_string(),
+                    symbol: Some("DUST".to_string()),
+                    name: None,
+                    decimals: 6,
+                    ui_amount: 0.0,
+                    usd_price: None,
+                    usd_value: None,
+                    supply_percent: None,
+                },
+            ],
+            total_usd_value: None,
+        };
+
+        let price_cache = HashMap::from([("SOL".to_string(), 100.0), ("USDC".to_string(), 1.0)]);
+        let rows = balances_to_rows(
+            vec![WalletBalances::Solana(wallet, balances)],
+            &price_cache,
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].symbol, "SOL");
+        assert_eq!(rows[0].chain_or_service, "Solana");
+        assert_eq!(rows[0].amount, 2.0);
+        assert_eq!(rows[0].usd_price, Some(100.0));
+        assert_eq!(rows[0].usd_value, Some(200.0));
+        assert_eq!(rows[0].as_of, "2026-01-01T00:00:00Z");
+        assert_eq!(rows[1].symbol, "USDC");
+        assert_eq!(rows[1].usd_value, Some(100.0));
+    }
+
+    #[test]
+    fn test_format_export_rows_csv() {
+        let rows = vec![ExportRow {
+            company: "Test".to_string(),
+            account: "Wallet, Main".to_string(),
+            chain_or_service: "Solana".to_string(),
+            symbol: "SOL".to_string(),
+            amount: 1.5,
+            usd_price: None,
+            usd_value: None,
+            as_of: "2026-01-01T00:00:00Z".to_string(),
+        }];
+
+        let csv = format_export_rows(&rows, "csv").unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "company,account,chain_or_service,symbol,amount,usd_price,usd_value,as_of"
+        );
+        assert_eq!(
+            lines[1],
+            "Test,\"Wallet, Main\",Solana,SOL,1.5,,,2026-01-01T00:00:00Z"
+        );
     }
 }

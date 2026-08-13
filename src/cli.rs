@@ -7,13 +7,16 @@ use clap::{Parser, Subcommand};
   gringotts add -n \"My Wallet\" -a 0x742d35Cc6634C0532925a3b844Bc9e7595f5bE5B
   gringotts add -c CompanyName -n \"Hot Wallet\" -a 5FHneW46... --chain solana
   gringotts add-bank -c CompanyName -n \"Checking\" -i 87c9c4a4-... -s mercury
+  gringotts add-bank -n \"Altitude\" -s manual
+  gringotts set-balance \"Altitude\" 12500
   gringotts list
   gringotts list -c CompanyName
   gringotts query
   gringotts query-one \"My Wallet\"
   gringotts setup-mercury -c CompanyName
   gringotts export-transactions \"Checking\" --start 2025-01-01 --end 2025-01-31
-  gringotts export-transactions \"Checking\" -f json -o transactions.json")]
+  gringotts export-transactions \"Checking\" -f json -o transactions.json
+  gringotts export-balances -f json -o balances.json")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -41,7 +44,7 @@ pub enum Commands {
         chain: Option<String>,
     },
 
-    /// Add a banking account to track (Mercury)
+    /// Add a banking account to track (Mercury, Circle, manual)
     AddBank {
         /// Company/organization for this account
         #[arg(short, long, default_value = "")]
@@ -51,13 +54,22 @@ pub enum Commands {
         #[arg(short, long)]
         name: String,
 
-        /// The account ID
+        /// The account ID (required for mercury/circle, omit for manual)
         #[arg(short = 'i', long)]
-        account_id: String,
+        account_id: Option<String>,
 
-        /// Banking service (mercury)
+        /// Banking service (mercury, circle, manual)
         #[arg(short, long)]
         service: String,
+    },
+
+    /// Set the stored USD balance of a manual account
+    SetBalance {
+        /// Name of the manual account
+        name: String,
+
+        /// Balance in USD
+        amount: f64,
     },
 
     /// List tracked addresses and accounts (optionally filter by company)
@@ -82,6 +94,10 @@ pub enum Commands {
         /// Skip price lookups (faster, no USD values)
         #[arg(long)]
         no_prices: bool,
+
+        /// Write portfolio snapshot JSON to ~/.gringotts/snapshots/
+        #[arg(long)]
+        snapshot: bool,
     },
 
     /// Query balances for a specific address or banking account by name
@@ -128,6 +144,21 @@ pub enum Commands {
         /// Output file path (defaults to stdout)
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// Export current balances for all tracked addresses and accounts
+    ExportBalances {
+        /// Output format (csv or json)
+        #[arg(short, long, default_value = "csv")]
+        format: String,
+
+        /// Output file path (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Skip price lookups (faster, no USD values)
+        #[arg(long)]
+        no_prices: bool,
     },
 
     /// Start the web server with HTMX frontend
