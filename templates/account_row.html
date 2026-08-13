@@ -5,7 +5,16 @@
                 <i data-lucide="wallet" style="width: 16px; height: 16px;"></i>
             </div>
             <div>
-                <div class="asset-name">{{ name }}</div>
+                <div class="asset-name rename-label">
+                    <span>{{ name }}</span>
+                    <button class="rename-btn" title="Rename" onclick="startRename(this)">
+                        <i data-lucide="pencil" style="width: 12px; height: 12px;"></i>
+                    </button>
+                </div>
+                <form class="rename-form" hidden hx-patch="/accounts/{{ name }}" hx-swap="none">
+                    <input type="text" name="new_name" value="{{ name }}" class="rename-input">
+                    <span class="rename-error"></span>
+                </form>
                 <div class="asset-symbol truncate" title="{{ address }}">{{ address }}</div>
             </div>
         </div>
