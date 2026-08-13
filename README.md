@@ -5,7 +5,7 @@ Multi-chain cryptocurrency portfolio tracker with banking integration. Track bal
 ## Features
 
 - **Multi-chain support**: Solana, Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Avalanche, Core, NEAR, Aptos, Sui, Starknet
-- **Banking integration**: Mercury, Circle
+- **Banking integration**: Mercury, Circle, manual accounts (hand-entered balances)
 - **Real-time pricing**: USD values via Switchboard Surge
 - **Portfolio aggregation**: Group assets by company/organization
 - **Web interface**: HTMX-powered dashboard
@@ -146,6 +146,12 @@ gringotts add-bank --name "Operating" --account-id <mercury-account-id> --servic
 
 # Add Circle account
 gringotts add-bank --name "Circle USD" --account-id <circle-account-id> --service circle
+
+# Add a manual account (banks/exchanges without API access, no account ID needed)
+gringotts add-bank --name "Altitude" --service manual --company "CompanyName"
+
+# Set or update its USD balance (displayed with an "as of" date)
+gringotts set-balance "Altitude" 12500.00
 
 # Query all balances (includes all banking accounts)
 gringotts query

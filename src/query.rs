@@ -259,6 +259,10 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     });
                 }
             },
+            BankingService::Manual => {
+                // Balance is stored locally, nothing to fetch.
+                all_balances.push(WalletBalances::Manual(account.clone()));
+            }
         }
         pb.inc(1);
     }
@@ -319,7 +323,9 @@ pub fn extract_token_symbols(all_balances: &[WalletBalances]) -> HashSet<String>
             WalletBalances::Starknet(_, _) => {
                 symbols.insert("ETH".to_string());
             }
-            WalletBalances::Mercury(_, _) | WalletBalances::Circle(_, _) => {
+            WalletBalances::Mercury(_, _)
+            | WalletBalances::Circle(_, _)
+            | WalletBalances::Manual(_) => {
                 // Banking balances are already in USD/EUR, no price lookup needed
             }
         }
@@ -503,6 +509,22 @@ fn enrich_and_display_balances(
                     &account.company,
                     &account.name,
                     &balances,
+                );
+            }
+            WalletBalances::Manual(account) => {
+                ui::render_manual_balance(&account);
+                let amount = account
+                    .manual_balance
+                    .as_ref()
+                    .map(|m| m.amount)
+                    .unwrap_or(0.0);
+                add_asset_to_portfolio(
+                    &mut portfolio,
+                    &account.company,
+                    &account.name,
+                    "USD",
+                    amount,
+                    Some(amount),
                 );
             }
         }
@@ -723,6 +745,7 @@ pub async fn query_one(identifier: String, rpc_url: Option<String>, no_prices: b
                     &account.service,
                 );
             }
+            BankingService::Manual => ui::render_manual_balance(account),
         }
 
         return Ok(());
@@ -1087,6 +1110,11 @@ pub async fn export_transactions(
         BankingService::Circle => {
             return Err(anyhow::anyhow!(
                 "Transaction export not yet supported for Circle accounts"
+            ));
+        }
+        BankingService::Manual => {
+            return Err(anyhow::anyhow!(
+                "Transaction export not supported for manual accounts"
             ));
         }
     }

@@ -565,6 +565,36 @@ fn populate_wallet_view(
     }
 }
 
+/// Service label for display. Manual accounts carry the date their balance was
+/// last entered so staleness is visible; every other service is unchanged
+/// (manual_as_of is None for them).
+fn service_label(account: &crate::storage::BankingAccount) -> String {
+    match account.manual_as_of() {
+        Some(date) => format!("Manual (as of {})", date),
+        None => account.service.display_name().to_string(),
+    }
+}
+
+/// Cache entry for a manual account, built from the stored balance instead of
+/// an API call.
+fn manual_cached_balance(account: &crate::storage::BankingAccount) -> CachedBalance {
+    let amount = account
+        .manual_balance
+        .as_ref()
+        .map(|m| m.amount)
+        .unwrap_or(0.0);
+    CachedBalance {
+        name: account.name.clone(),
+        address_or_id: account.account_id.clone(),
+        chain_or_service: service_label(account),
+        native_symbol: "USD".to_string(),
+        native_balance: amount,
+        native_usd_value: Some(amount),
+        tokens: vec![],
+        total_usd_value: Some(amount),
+    }
+}
+
 /// Build a BankingView for an account, same caching shape as
 /// populate_wallet_view.
 fn populate_banking_view(
@@ -576,7 +606,7 @@ fn populate_banking_view(
         name: account.name.clone(),
         company: account.company.clone(),
         account_id: account.account_id.clone(),
-        service: account.service.display_name().to_string(),
+        service: service_label(account),
         cached_total_usd: total,
         cached_native_symbol: sym,
         cached_native_balance: bal,
@@ -720,7 +750,7 @@ fn aggregate_cash_holdings(
         if let Some(c) = cache.get_balance_unchecked(&account.name) {
             rows.push(CashRow {
                 name: account.name.clone(),
-                service: account.service.display_name().to_string(),
+                service: service_label(account),
                 currency: c.native_symbol.clone(),
                 balance: c.native_balance,
                 usd_value: c.total_usd_value,
@@ -1480,6 +1510,13 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                     failure_count += 1;
                 }
             },
+            BankingService::Manual => {
+                let _ = state
+                    .cache
+                    .update_balance(&account.name, manual_cached_balance(account))
+                    .await;
+                success_count += 1;
+            }
         }
     }
 
@@ -3379,6 +3416,13 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                     );
                 }
             },
+            BankingService::Manual => {
+                all_symbols.insert("USD".to_string());
+                let _ = state
+                    .cache
+                    .update_balance(&account.name, manual_cached_balance(account))
+                    .await;
+            }
         }
     }
 
@@ -3691,7 +3735,7 @@ async fn query_wallet_balance(wallet: &crate::storage::WalletAddress) -> Html<St
 }
 
 async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<String> {
-    let service_name = account.service.display_name().to_string();
+    let service_name = service_label(account);
 
     match &account.service {
         BankingService::Mercury => match MercuryClient::new() {
@@ -3835,6 +3879,44 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                 .unwrap_or_default(),
             ),
         },
+        BankingService::Manual => {
+            let amount = account.manual_balance.as_ref().map(|m| m.amount);
+            let tsv = match amount {
+                Some(a) => build_single_balance_tsv(
+                    &account.name,
+                    &service_name,
+                    &account.account_id,
+                    "USD",
+                    a,
+                    a,
+                    &[],
+                ),
+                None => String::new(),
+            };
+            Html(
+                SingleBalanceTemplate {
+                    name: account.name.clone(),
+                    address: account.account_id.clone(),
+                    chain: service_name,
+                    native_symbol: if amount.is_some() {
+                        "USD".to_string()
+                    } else {
+                        String::new()
+                    },
+                    native_balance: amount.unwrap_or(0.0),
+                    native_usd: amount.unwrap_or(0.0),
+                    tokens: vec![],
+                    total_usd: amount.unwrap_or(0.0),
+                    tsv_export: tsv,
+                    error: match amount {
+                        Some(_) => String::new(),
+                        None => "Balance not set - run gringotts set-balance".to_string(),
+                    },
+                }
+                .render()
+                .unwrap_or_default(),
+            )
+        }
     }
 }
 
@@ -3972,6 +4054,17 @@ async fn get_bank_transactions(account: &crate::storage::BankingAccount) -> Html
                 account_type: "Circle".to_string(),
                 transactions: vec![],
                 error: "Transaction history not available for Circle accounts".to_string(),
+                explorer_url: String::new(),
+            }
+            .render()
+            .unwrap_or_default(),
+        ),
+        BankingService::Manual => Html(
+            TransactionsTemplate {
+                name: account.name.clone(),
+                account_type: "Manual".to_string(),
+                transactions: vec![],
+                error: "Transaction history not available for manual accounts".to_string(),
                 explorer_url: String::new(),
             }
             .render()
@@ -4665,6 +4758,7 @@ mod tests {
             company: "Acme".to_string(),
             account_id: "acc_123".to_string(),
             service: BankingService::Mercury,
+            manual_balance: None,
         };
 
         let view = populate_banking_view(&account, &cache);
@@ -5042,6 +5136,7 @@ mod tests {
             company: String::new(),
             account_id: "acc".to_string(),
             service: crate::storage::BankingService::Mercury,
+            manual_balance: None,
         });
 
         let rows = aggregate_crypto_holdings(&book, &cache);
@@ -5129,12 +5224,14 @@ mod tests {
             company: String::new(),
             account_id: "m1".to_string(),
             service: BankingService::Mercury,
+            manual_balance: None,
         });
         book.banking_accounts.push(BankingAccount {
             name: "Circle Ops".to_string(),
             company: String::new(),
             account_id: "c1".to_string(),
             service: BankingService::Circle,
+            manual_balance: None,
         });
 
         let rows = aggregate_cash_holdings(&book, &cache);
@@ -5264,6 +5361,7 @@ mod tests {
             company: String::new(),
             account_id: "m1".to_string(),
             service: BankingService::Mercury,
+            manual_balance: None,
         });
 
         let tsv = per_account_tsv(&book, &cache);
@@ -5289,6 +5387,7 @@ mod tests {
             company: String::new(),
             account_id: "x".to_string(),
             service: BankingService::Mercury,
+            manual_balance: None,
         });
         assert!(aggregate_cash_holdings(&book, &cache).is_empty());
     }

@@ -936,6 +936,45 @@ pub fn render_circle_balances(
     println!("╚{}╝\n", "═".repeat(box_width + 2));
 }
 
+/// Renders a manual account: the hand-entered balance plus the date it was
+/// entered, so staleness is visible at a glance.
+pub fn render_manual_balance(account: &crate::storage::BankingAccount) {
+    const MIN_WIDTH: usize = 79;
+    let mut lines = Vec::new();
+
+    let display_company = if account.company.is_empty() {
+        "-"
+    } else {
+        &account.company
+    };
+    lines.push(format!("Company: {}", display_company));
+    lines.push(format!("Account: {}", account.name));
+    lines.push(format!("Service: {}", account.service.display_name()));
+
+    match (&account.manual_balance, account.manual_as_of()) {
+        (Some(manual), Some(as_of)) => lines.push(format!(
+            "Balance: ${} (as of {})",
+            format_usd(manual.amount),
+            as_of
+        )),
+        _ => lines.push(format!(
+            "Balance: not set - use 'gringotts set-balance \"{}\" <amount>'",
+            account.name
+        )),
+    }
+
+    let max_content_width = lines.iter().map(|l| l.len()).max().unwrap_or(MIN_WIDTH);
+    let box_width = max_content_width.max(MIN_WIDTH);
+
+    println!("\n╔{}╗", "═".repeat(box_width + 2));
+    for line in lines.iter().take(3) {
+        println!("║  {:<width$} ║", line, width = box_width);
+    }
+    println!("╠{}╣", "═".repeat(box_width + 2));
+    println!("║  {:<width$} ║", lines[3], width = box_width);
+    println!("╚{}╝\n", "═".repeat(box_width + 2));
+}
+
 /// Renders a summary of failed wallet/account queries
 pub fn render_fetch_failures(failures: &[FetchFailure]) {
     if failures.is_empty() {

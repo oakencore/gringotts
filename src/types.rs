@@ -168,6 +168,8 @@ pub enum WalletBalances {
     Starknet(WalletAddress, starknet::AccountBalances),
     Mercury(BankingAccount, mercury::AccountBalances),
     Circle(BankingAccount, circle::AccountBalances),
+    /// Manual accounts carry their balance on the account itself.
+    Manual(BankingAccount),
 }
 
 /// Represents a failed wallet/account query

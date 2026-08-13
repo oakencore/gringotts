@@ -55,7 +55,21 @@ async fn main() -> Result<()> {
             service,
         } => {
             let banking_service = BankingService::from_str(&service)?;
+            let account_id = match (account_id, &banking_service) {
+                (Some(id), _) => id,
+                (None, BankingService::Manual) => String::new(),
+                (None, other) => anyhow::bail!(
+                    "--account-id is required for {} accounts",
+                    other.display_name()
+                ),
+            };
             add_banking_account(company, name, account_id, banking_service)?;
+        }
+        Commands::SetBalance { name, amount } => {
+            let mut book = AddressBook::load()?;
+            book.set_manual_balance(&name, amount)?;
+            book.save()?;
+            ui::render_success(&format!("Balance for '{}' set to ${:.2}", name, amount));
         }
         Commands::SetupMercury { company } => {
             setup_mercury_accounts(company).await?;
@@ -218,6 +232,7 @@ fn add_banking_account(
         name,
         account_id,
         service,
+        manual_balance: None,
     };
 
     book.banking_accounts.push(account);
@@ -260,6 +275,7 @@ async fn setup_mercury_accounts(company: String) -> Result<()> {
             name: account.name.clone(),
             account_id: account.id.clone(),
             service: BankingService::Mercury,
+            manual_balance: None,
         };
 
         book.banking_accounts.push(banking_account);

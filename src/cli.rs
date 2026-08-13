@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
   gringotts add -n \"My Wallet\" -a 0x742d35Cc6634C0532925a3b844Bc9e7595f5bE5B
   gringotts add -c CompanyName -n \"Hot Wallet\" -a 5FHneW46... --chain solana
   gringotts add-bank -c CompanyName -n \"Checking\" -i 87c9c4a4-... -s mercury
+  gringotts add-bank -n \"Altitude\" -s manual
+  gringotts set-balance \"Altitude\" 12500
   gringotts list
   gringotts list -c CompanyName
   gringotts query
@@ -41,7 +43,7 @@ pub enum Commands {
         chain: Option<String>,
     },
 
-    /// Add a banking account to track (Mercury)
+    /// Add a banking account to track (Mercury, Circle, manual)
     AddBank {
         /// Company/organization for this account
         #[arg(short, long, default_value = "")]
@@ -51,13 +53,22 @@ pub enum Commands {
         #[arg(short, long)]
         name: String,
 
-        /// The account ID
+        /// The account ID (required for mercury/circle, omit for manual)
         #[arg(short = 'i', long)]
-        account_id: String,
+        account_id: Option<String>,
 
-        /// Banking service (mercury)
+        /// Banking service (mercury, circle, manual)
         #[arg(short, long)]
         service: String,
+    },
+
+    /// Set the stored USD balance of a manual account
+    SetBalance {
+        /// Name of the manual account
+        name: String,
+
+        /// Balance in USD
+        amount: f64,
     },
 
     /// List tracked addresses and accounts (optionally filter by company)

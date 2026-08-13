@@ -25,6 +25,8 @@ pub enum Chain {
 pub enum BankingService {
     Mercury,
     Circle,
+    /// Account Gringotts cannot reach via API - balance is entered by hand.
+    Manual,
 }
 
 impl BankingService {
@@ -32,6 +34,7 @@ impl BankingService {
         match s.to_lowercase().as_str() {
             "mercury" => Ok(BankingService::Mercury),
             "circle" => Ok(BankingService::Circle),
+            "manual" => Ok(BankingService::Manual),
             _ => anyhow::bail!("Unknown banking service: {}", s),
         }
     }
@@ -40,6 +43,7 @@ impl BankingService {
         match self {
             BankingService::Mercury => "Mercury Banking",
             BankingService::Circle => "Circle",
+            BankingService::Manual => "Manual",
         }
     }
 }
@@ -131,6 +135,15 @@ pub struct WalletAddress {
     pub chain: Chain,
 }
 
+/// Hand-entered balance for a `BankingService::Manual` account. Amount and
+/// timestamp live together so they cannot drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ManualBalance {
+    pub amount: f64,
+    /// RFC3339 timestamp of the last `set-balance` call.
+    pub updated_at: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BankingAccount {
     #[serde(default)]
@@ -138,6 +151,19 @@ pub struct BankingAccount {
     pub name: String,
     pub account_id: String,
     pub service: BankingService,
+    /// Only set for Manual accounts. Defaulted on load so address books
+    /// written before this field existed still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_balance: Option<ManualBalance>,
+}
+
+impl BankingAccount {
+    /// Date part of the manual balance timestamp, for "as of" display.
+    pub fn manual_as_of(&self) -> Option<&str> {
+        self.manual_balance
+            .as_ref()
+            .map(|m| m.updated_at.get(..10).unwrap_or(&m.updated_at))
+    }
 }
 
 /// Why a rename was rejected. The web handler maps each variant to an
@@ -399,6 +425,31 @@ impl AddressBook {
             name,
             account_id,
             service,
+            manual_balance: None,
+        });
+        Ok(())
+    }
+
+    /// Store a hand-entered USD balance on a Manual account, stamped with the
+    /// current time so staleness is visible downstream.
+    pub fn set_manual_balance(&mut self, name: &str, amount: f64) -> Result<()> {
+        let account = self
+            .banking_accounts
+            .iter_mut()
+            .find(|a| a.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Banking account '{}' not found", name))?;
+
+        if account.service != BankingService::Manual {
+            anyhow::bail!(
+                "'{}' is a {} account - balances are fetched from the API",
+                name,
+                account.service.display_name()
+            );
+        }
+
+        account.manual_balance = Some(ManualBalance {
+            amount,
+            updated_at: chrono::Utc::now().to_rfc3339(),
         });
         Ok(())
     }
@@ -432,12 +483,22 @@ mod tests {
                 address: "abc123".to_string(),
                 chain: Chain::Solana,
             }],
-            banking_accounts: vec![BankingAccount {
-                company: "Acme".to_string(),
-                name: "Mercury Checking".to_string(),
-                account_id: "m-1".to_string(),
-                service: BankingService::Mercury,
-            }],
+            banking_accounts: vec![
+                BankingAccount {
+                    company: "Acme".to_string(),
+                    name: "Mercury Checking".to_string(),
+                    account_id: "m-1".to_string(),
+                    service: BankingService::Mercury,
+                    manual_balance: None,
+                },
+                BankingAccount {
+                    company: "Acme".to_string(),
+                    name: "Altitude".to_string(),
+                    account_id: String::new(),
+                    service: BankingService::Manual,
+                    manual_balance: None,
+                },
+            ],
         }
     }
 
@@ -524,5 +585,65 @@ mod tests {
             b.rename_account("Nope", "Hot Wallet"),
             Err(RenameError::NotFound)
         );
+    }
+
+    #[test]
+    fn banking_service_from_str_manual() {
+        assert_eq!(
+            BankingService::from_str("Manual").unwrap(),
+            BankingService::Manual
+        );
+    }
+
+    #[test]
+    fn banking_account_without_manual_fields_parses() {
+        let json = r#"{
+            "addresses": [],
+            "banking_accounts": [
+                {"company": "Acme", "name": "Checking", "account_id": "m-1", "service": "Mercury"}
+            ]
+        }"#;
+        let b: AddressBook = serde_json::from_str(json).expect("old format must still parse");
+        assert_eq!(b.banking_accounts.len(), 1);
+        assert_eq!(b.banking_accounts[0].manual_balance, None);
+    }
+
+    #[test]
+    fn manual_account_round_trip() {
+        let mut b = book();
+        b.set_manual_balance("Altitude", 12500.0).unwrap();
+        let path = std::env::temp_dir().join("gringotts_manual_round_trip.json");
+        b.save_to_path(&path).unwrap();
+        let loaded = AddressBook::load_from_path(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        let account = loaded
+            .banking_accounts
+            .iter()
+            .find(|a| a.name == "Altitude")
+            .unwrap();
+        assert_eq!(account.manual_balance, b.banking_accounts[1].manual_balance);
+        assert_eq!(account.manual_as_of().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn set_manual_balance_sets_amount_and_timestamp() {
+        let mut b = book();
+        b.set_manual_balance("Altitude", 42.5).unwrap();
+        let manual = b.banking_accounts[1].manual_balance.as_ref().unwrap();
+        assert_eq!(manual.amount, 42.5);
+        assert!(chrono::DateTime::parse_from_rfc3339(&manual.updated_at).is_ok());
+    }
+
+    #[test]
+    fn set_manual_balance_rejects_non_manual() {
+        let mut b = book();
+        assert!(b.set_manual_balance("Mercury Checking", 1.0).is_err());
+    }
+
+    #[test]
+    fn set_manual_balance_unknown_name_errors() {
+        let mut b = book();
+        assert!(b.set_manual_balance("Nope", 1.0).is_err());
     }
 }
