@@ -51,6 +51,16 @@ pub fn supply_percentage(ui_amount: f64, total_supply: f64) -> Option<f64> {
     Some(ui_amount / total_supply * 100.0)
 }
 
+/// " (X.XX% of supply)" annotation, or empty below the 0.01% noise floor.
+/// Shared by the terminal renderer and the web dashboard so both surfaces
+/// use one threshold and one format.
+pub fn supply_suffix(supply_percent: Option<f64>) -> String {
+    match supply_percent {
+        Some(p) if p >= 0.01 => format!(" ({:.2}% of supply)", p),
+        _ => String::new(),
+    }
+}
+
 #[derive(Debug)]
 pub struct AccountBalances {
     pub sol_balance: f64,

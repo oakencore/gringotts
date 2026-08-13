@@ -583,7 +583,7 @@ fn snapshot_filename(timestamp: &str) -> String {
     format!("{}.json", timestamp.replace(':', "-"))
 }
 
-fn write_snapshot(portfolio: &PortfolioSummary) -> Result<std::path::PathBuf> {
+pub(crate) fn write_snapshot(portfolio: &PortfolioSummary) -> Result<std::path::PathBuf> {
     let dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?
         .join(".gringotts")
@@ -1200,15 +1200,15 @@ fn export_mercury_transactions(
 
 /// One asset holding, flattened for export. One row per symbol per account.
 #[derive(serde::Serialize)]
-struct ExportRow {
-    company: String,
-    account: String,
-    chain_or_service: String,
-    symbol: String,
-    amount: f64,
-    usd_price: Option<f64>,
-    usd_value: Option<f64>,
-    as_of: String,
+pub(crate) struct ExportRow {
+    pub company: String,
+    pub account: String,
+    pub chain_or_service: String,
+    pub symbol: String,
+    pub amount: f64,
+    pub usd_price: Option<f64>,
+    pub usd_value: Option<f64>,
+    pub as_of: String,
 }
 
 fn balances_to_rows(
@@ -1413,7 +1413,7 @@ fn balances_to_rows(
     rows
 }
 
-fn format_export_rows(rows: &[ExportRow], format: &str) -> Result<String> {
+pub(crate) fn format_export_rows(rows: &[ExportRow], format: &str) -> Result<String> {
     let output_data = match format.to_lowercase().as_str() {
         "json" => format!("{}\n", serde_json::to_string_pretty(&rows)?),
         _ => {

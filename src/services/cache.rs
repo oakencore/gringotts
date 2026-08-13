@@ -42,6 +42,10 @@ pub struct CachedToken {
     pub symbol: String,
     pub balance: f64,
     pub usd_value: Option<f64>,
+    /// Share of total token supply held, 0-100. Solana only; absent in
+    /// cache files written before this field existed.
+    #[serde(default)]
+    pub supply_percent: Option<f64>,
 }
 
 /// The main cache structure persisted to disk
@@ -286,6 +290,14 @@ mod tests {
         assert_eq!(retrieved.unwrap().native_balance, 10.0);
 
         assert!(cache.get_balance_unchecked("Missing Wallet").is_none());
+    }
+
+    #[test]
+    fn test_cached_token_supply_percent_is_back_compat() {
+        // Cache files written before supply_percent existed must still parse.
+        let old = r#"{"symbol":"BONK","balance":1.0,"usd_value":2.0}"#;
+        let token: CachedToken = serde_json::from_str(old).expect("legacy token parses");
+        assert_eq!(token.supply_percent, None);
     }
 
     #[test]

@@ -221,6 +221,15 @@ gringotts serve
 gringotts serve --port 8080
 ```
 
+**Dashboard controls:**
+
+- **Copy TSV** - copies the visible holdings table to the clipboard
+- **Export CSV** - downloads the cached balances (`/export/balances.csv`), same columns as `gringotts export-balances`
+- **Snapshot** - writes the cached portfolio to `~/.gringotts/snapshots/<timestamp>.json`, same format as `gringotts query --snapshot`
+- **Refresh All** - re-queries every chain and bank account
+
+Export and Snapshot read the cache, so they need one refresh first; before that they report that nothing is cached instead of writing an empty file. Solana token rows show the share of total supply held when it is at least 0.01%.
+
 **Access the dashboard:**
 
 - **Local access:** `http://localhost:3000`

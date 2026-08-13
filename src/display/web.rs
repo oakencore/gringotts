@@ -15,7 +15,7 @@ use crate::storage::{AddressBook, BankingService, Chain, RenameError};
 use askama::Template;
 use axum::{
     extract::{Path, Query, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
@@ -623,6 +623,10 @@ struct AssetAggregate {
     price: Option<f64>,
     /// Distinct chains the asset is held on, sorted alphabetically.
     chains: Vec<String>,
+    /// "(X.XX% of supply)" for Solana tokens with supply data, else empty.
+    /// Percentages of the same total supply add, so summing across wallets is
+    /// the holder's combined share.
+    supply_note: String,
 }
 
 /// One row in the dashboard's separate "Cash" section. Banking accounts are
@@ -652,6 +656,7 @@ fn aggregate_crypto_holdings(
         balance: f64,
         usd_value: Option<f64>,
         chains: HashSet<String>,
+        supply_percent: Option<f64>,
     }
     let mut buckets: HashMap<String, Bucket> = HashMap::new();
 
@@ -659,7 +664,8 @@ fn aggregate_crypto_holdings(
                 symbol: &str,
                 balance: f64,
                 usd: Option<f64>,
-                chain: &str| {
+                chain: &str,
+                supply_percent: Option<f64>| {
         if balance == 0.0 && usd.unwrap_or(0.0) == 0.0 {
             return;
         }
@@ -667,12 +673,16 @@ fn aggregate_crypto_holdings(
             balance: 0.0,
             usd_value: None,
             chains: HashSet::new(),
+            supply_percent: None,
         });
         entry.balance += balance;
         if let Some(v) = usd {
             *entry.usd_value.get_or_insert(0.0) += v;
         }
         entry.chains.insert(chain.to_string());
+        if let Some(p) = supply_percent {
+            *entry.supply_percent.get_or_insert(0.0) += p;
+        }
     };
 
     // Per-wallet usd_value isn't always populated (e.g., chain clients that
@@ -699,6 +709,7 @@ fn aggregate_crypto_holdings(
                 cached.native_usd_value,
             ),
             &cached.chain_or_service,
+            None,
         );
         for token in &cached.tokens {
             fold(
@@ -707,6 +718,7 @@ fn aggregate_crypto_holdings(
                 token.balance,
                 derive_usd(&token.symbol, token.balance, token.usd_value),
                 &cached.chain_or_service,
+                token.supply_percent,
             );
         }
     }
@@ -726,6 +738,7 @@ fn aggregate_crypto_holdings(
                 usd_value: b.usd_value,
                 price,
                 chains,
+                supply_note: solana::supply_suffix(b.supply_percent).trim().to_string(),
             }
         })
         .collect();
@@ -762,6 +775,71 @@ fn aggregate_cash_holdings(
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => a.name.cmp(&b.name),
+    });
+    rows
+}
+
+/// Flatten the cached balances into the export rows the CLI's
+/// `export-balances` command produces, so the web export and the CLI export
+/// share one column format. Company names come from the address book; cache
+/// entries with no matching account (orphans) are skipped, as are zero-amount
+/// holdings, matching `balances_to_rows`.
+fn cache_export_rows(
+    book: &crate::storage::AddressBook,
+    cache: &crate::services::cache::BalanceCache,
+    as_of: &str,
+) -> Vec<crate::query::ExportRow> {
+    let mut companies: HashMap<&str, &str> = HashMap::new();
+    for w in &book.addresses {
+        companies.insert(&w.name, &w.company);
+    }
+    for a in &book.banking_accounts {
+        companies.insert(&a.name, &a.company);
+    }
+
+    let prices = &cache.prices.data;
+    let price_of = |symbol: &str| -> Option<f64> {
+        if symbol == "USD" {
+            return Some(1.0);
+        }
+        prices.get(symbol).copied()
+    };
+
+    let mut rows = Vec::new();
+    for (name, entry) in &cache.balances {
+        let Some(company) = companies.get(name.as_str()) else {
+            continue;
+        };
+        let cached = &entry.data;
+        let mut push = |symbol: &str, amount: f64, explicit: Option<f64>| {
+            if amount == 0.0 {
+                return;
+            }
+            let usd_price = price_of(symbol);
+            rows.push(crate::query::ExportRow {
+                company: company.to_string(),
+                account: cached.name.clone(),
+                chain_or_service: cached.chain_or_service.clone(),
+                symbol: symbol.to_string(),
+                amount,
+                usd_price,
+                usd_value: explicit.or_else(|| usd_price.map(|p| amount * p)),
+                as_of: as_of.to_string(),
+            });
+        };
+        push(
+            &cached.native_symbol,
+            cached.native_balance,
+            cached.native_usd_value,
+        );
+        for token in &cached.tokens {
+            push(&token.symbol, token.balance, token.usd_value);
+        }
+    }
+
+    // HashMap iteration order is arbitrary; keep exports byte-stable.
+    rows.sort_by(|a, b| {
+        (&a.company, &a.account, &a.symbol).cmp(&(&b.company, &b.account, &b.symbol))
     });
     rows
 }
@@ -1044,6 +1122,8 @@ pub async fn start_server(
         .route("/api/balances/:address", get(get_single_balance_json))
         .route("/api/totals", get(get_totals_json))
         .route("/api/totals/company/:company", get(get_company_totals_json))
+        .route("/export/balances.csv", get(export_balances_csv))
+        .route("/snapshot", post(write_cache_snapshot))
         .route("/api/cache/status", get(cache_status))
         .route("/api/refresh", post(manual_refresh))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
@@ -1189,6 +1269,7 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                                     symbol: symbol.clone(),
                                     balance: token.ui_amount,
                                     usd_value: token.usd_value,
+                                    supply_percent: token.supply_percent,
                                 });
                             }
                         }
@@ -1372,6 +1453,8 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                                     symbol: symbol.clone(),
                                     balance: token.ui_amount,
                                     usd_value: token.usd_value,
+                                    // EVM has no supply data; annotation is Solana-only.
+                                    supply_percent: None,
                                 });
                             }
                         }
@@ -1476,6 +1559,7 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
                                 } else {
                                     None
                                 },
+                                supply_percent: None,
                             });
                         }
                         let cached_balance = CachedBalance {
@@ -1571,6 +1655,91 @@ async fn cache_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "cached_prices": cache.prices.data.len(),
     });
     (StatusCode::OK, axum::Json(status))
+}
+
+/// Shown when export/snapshot run before the cache has anything in it, so the
+/// user gets a message instead of an empty file.
+const EMPTY_CACHE_MESSAGE: &str = "No cached balances yet. Refresh All first, then try again.";
+
+/// Export rows built from the current cache, or a user-facing message.
+/// Shared by the CSV export and the snapshot endpoints.
+async fn cached_export_rows(state: &Arc<AppState>) -> Result<Vec<crate::query::ExportRow>, String> {
+    let book = AddressBook::load().map_err(|e| format!("Failed to load accounts: {}", e))?;
+    let cache = state.cache.read().await;
+    // The cache's last refresh is the true as-of for these numbers, not now().
+    let as_of = cache
+        .last_full_refresh
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0))
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let rows = cache_export_rows(&book, &cache, &as_of);
+    if rows.is_empty() {
+        return Err(EMPTY_CACHE_MESSAGE.to_string());
+    }
+    Ok(rows)
+}
+
+/// Download the cached balances as CSV, same columns as `export-balances`.
+async fn export_balances_csv(State(state): State<Arc<AppState>>) -> Response {
+    let rows = match cached_export_rows(&state).await {
+        Ok(rows) => rows,
+        Err(msg) => return (StatusCode::SERVICE_UNAVAILABLE, msg).into_response(),
+    };
+    match crate::query::format_export_rows(&rows, "csv") {
+        Ok(csv) => (
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"gringotts-balances.csv\"",
+                ),
+            ],
+            csv,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to build CSV: {}", e),
+        )
+            .into_response(),
+    }
+}
+
+/// Write the cached portfolio to ~/.gringotts/snapshots/<timestamp>.json.
+/// Returns an HTML fragment HTMX drops next to the button.
+async fn write_cache_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = |class: &str, text: String| {
+        Html(format!(
+            "<span class=\"snapshot-status {}\">{}</span>",
+            class,
+            html_attr_escape(&text)
+        ))
+    };
+
+    let rows = match cached_export_rows(&state).await {
+        Ok(rows) => rows,
+        Err(msg) => return status("error", msg),
+    };
+
+    let mut portfolio = crate::types::PortfolioSummary {
+        companies: HashMap::new(),
+        total_usd_value: 0.0,
+    };
+    for row in &rows {
+        crate::types::add_asset_to_portfolio(
+            &mut portfolio,
+            &row.company,
+            &row.account,
+            &row.symbol,
+            row.amount,
+            row.usd_value,
+        );
+    }
+
+    match crate::query::write_snapshot(&portfolio) {
+        Ok(path) => status("", format!("Saved {}", path.display())),
+        Err(e) => status("error", format!("Snapshot failed: {}", e)),
+    }
 }
 
 /// Rate limit for manual refresh: 5 minutes (300 seconds)
@@ -3073,6 +3242,7 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                                     symbol: symbol.clone(),
                                     balance: token.ui_amount,
                                     usd_value: token.usd_value,
+                                    supply_percent: token.supply_percent,
                                 });
                             }
                         }
@@ -3263,6 +3433,8 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                                     symbol: symbol.clone(),
                                     balance: token.ui_amount,
                                     usd_value: token.usd_value,
+                                    // EVM has no supply data; annotation is Solana-only.
+                                    supply_percent: None,
                                 });
                             }
                         }
@@ -3382,6 +3554,7 @@ async fn query_balances(State(state): State<Arc<AppState>>) -> impl IntoResponse
                                 } else {
                                     None
                                 },
+                                supply_percent: None,
                             });
                         }
 
@@ -4461,6 +4634,7 @@ mod tests {
                 symbol: "USDC".to_string(),
                 balance: 500.0,
                 usd_value: Some(500.0),
+                supply_percent: None,
             }],
             total_usd_value: Some(1500.0),
         };
@@ -5069,6 +5243,7 @@ mod tests {
                     symbol: "USDC".to_string(),
                     balance: 100.0,
                     usd_value: Some(100.0),
+                    supply_percent: None,
                 }],
             ),
         );
@@ -5084,6 +5259,7 @@ mod tests {
                     symbol: "USDC".to_string(),
                     balance: 250.0,
                     usd_value: Some(250.0),
+                    supply_percent: None,
                 }],
             ),
         );
@@ -5245,6 +5421,117 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_crypto_holdings_sums_supply_percent() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let token = |pct: Option<f64>| CachedToken {
+            symbol: "BONK".to_string(),
+            balance: 100.0,
+            usd_value: Some(10.0),
+            supply_percent: pct,
+        };
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "W1",
+            cb(
+                "W1",
+                "Solana",
+                "SOL",
+                1.0,
+                Some(100.0),
+                vec![token(Some(0.4))],
+            ),
+        );
+        cache.set_balance(
+            "W2",
+            cb(
+                "W2",
+                "Solana",
+                "SOL",
+                1.0,
+                Some(100.0),
+                vec![token(Some(0.2))],
+            ),
+        );
+        let mut book = AddressBook::new();
+        book.addresses.push(wa("W1", Chain::Solana));
+        book.addresses.push(wa("W2", Chain::Solana));
+
+        let rows = aggregate_crypto_holdings(&book, &cache);
+        let bonk = rows.iter().find(|r| r.symbol == "BONK").expect("BONK row");
+        // Shares of the same supply add across wallets.
+        assert_eq!(bonk.supply_note, "(0.60% of supply)");
+        // Assets with no supply data carry no annotation.
+        let sol = rows.iter().find(|r| r.symbol == "SOL").expect("SOL row");
+        assert_eq!(sol.supply_note, "");
+    }
+
+    #[test]
+    fn test_cache_export_rows_maps_cache_to_csv_columns() {
+        use crate::services::cache::BalanceCache;
+        use crate::storage::{AddressBook, Chain};
+        let mut cache = BalanceCache::new();
+        cache.set_balance(
+            "W1",
+            cb(
+                "W1",
+                "Solana",
+                "SOL",
+                2.0,
+                None, // no per-wallet USD: price comes from the price cache
+                vec![CachedToken {
+                    symbol: "USDC".to_string(),
+                    balance: 50.0,
+                    usd_value: Some(50.0),
+                    supply_percent: None,
+                }],
+            ),
+        );
+        // Zero balances never reach the export.
+        cache.set_balance("W2", cb("W2", "Solana", "SOL", 0.0, None, vec![]));
+        // Orphan: cached but no longer in the address book.
+        cache.set_balance(
+            "Gone",
+            cb("Gone", "Solana", "SOL", 9.0, Some(900.0), vec![]),
+        );
+        cache.set_prices({
+            let mut m = std::collections::HashMap::new();
+            m.insert("SOL".to_string(), 100.0);
+            m
+        });
+
+        let mut book = AddressBook::new();
+        let mut w1 = wa("W1", Chain::Solana);
+        w1.company = "Acme".to_string();
+        book.addresses.push(w1);
+        book.addresses.push(wa("W2", Chain::Solana));
+
+        let rows = cache_export_rows(&book, &cache, "2026-08-13T00:00:00+00:00");
+        assert_eq!(rows.len(), 2, "orphan and zero rows are dropped");
+
+        assert_eq!(rows[0].company, "Acme");
+        assert_eq!(rows[0].account, "W1");
+        assert_eq!(rows[0].chain_or_service, "Solana");
+        assert_eq!(rows[0].symbol, "SOL");
+        assert_eq!(rows[0].amount, 2.0);
+        assert_eq!(rows[0].usd_price, Some(100.0));
+        assert_eq!(rows[0].usd_value, Some(200.0));
+        assert_eq!(rows[0].as_of, "2026-08-13T00:00:00+00:00");
+        assert_eq!(rows[1].symbol, "USDC");
+
+        let csv = crate::query::format_export_rows(&rows, "csv").expect("csv");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "company,account,chain_or_service,symbol,amount,usd_price,usd_value,as_of"
+        );
+        assert_eq!(
+            lines[1],
+            "Acme,W1,Solana,SOL,2,100,200,2026-08-13T00:00:00+00:00"
+        );
+    }
+
+    #[test]
     fn test_aggregated_holdings_tsv_includes_assets_and_cash() {
         let assets = vec![
             AssetAggregate {
@@ -5253,6 +5540,7 @@ mod tests {
                 usd_value: Some(150.0),
                 price: Some(100.0),
                 chains: vec!["Solana".to_string()],
+                supply_note: String::new(),
             },
             AssetAggregate {
                 symbol: "USDC".to_string(),
@@ -5260,6 +5548,7 @@ mod tests {
                 usd_value: Some(100.0),
                 price: Some(1.0),
                 chains: vec!["Base".to_string(), "Solana".to_string()],
+                supply_note: String::new(),
             },
         ];
         let cash = vec![CashRow {
@@ -5288,6 +5577,7 @@ mod tests {
             usd_value: None,
             price: None,
             chains: vec!["Solana".to_string()],
+            supply_note: String::new(),
         }];
         let tsv = aggregated_holdings_tsv(&assets, &[]);
         let lines: Vec<&str> = tsv.lines().collect();
@@ -5313,6 +5603,7 @@ mod tests {
                     symbol: "USDC".to_string(),
                     balance: 50.0,
                     usd_value: Some(50.0),
+                    supply_percent: None,
                 }],
             ),
         );

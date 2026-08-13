@@ -31,7 +31,10 @@
                 <span class="chain-badge">{{ chain }}</span>
                 {% endfor %}
             </td>
-            <td class="amount">{{ asset.balance|format_amount }} {{ asset.symbol }}</td>
+            <td class="amount">
+                {{ asset.balance|format_amount }} {{ asset.symbol }}
+                {% if !asset.supply_note.is_empty() %}<span class="supply-note">{{ asset.supply_note }}</span>{% endif %}
+            </td>
             <td class="amount">
                 {% if let Some(p) = asset.price %}${{ p|format_usd }}{% else %}--{% endif %}
             </td>
