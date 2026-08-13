@@ -182,7 +182,6 @@ pub enum WalletBalances {
 #[derive(Debug, Clone)]
 pub struct FetchFailure {
     pub name: String,
-    pub address_or_id: String,
     pub chain_or_service: String,
     pub error: String,
 }

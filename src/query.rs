@@ -54,7 +54,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -75,7 +74,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -96,7 +94,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -117,7 +114,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -138,7 +134,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -166,7 +161,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: wallet.name.clone(),
-                            address_or_id: wallet.address.clone(),
                             chain_or_service: wallet.chain.display_name().to_string(),
                             error: error_msg,
                         });
@@ -180,7 +174,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     ));
                     failures.push(FetchFailure {
                         name: wallet.name.clone(),
-                        address_or_id: wallet.address.clone(),
                         chain_or_service: wallet.chain.display_name().to_string(),
                         error: error_msg,
                     });
@@ -206,7 +199,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: account.name.clone(),
-                            address_or_id: account.account_id.clone(),
                             chain_or_service: account.service.display_name().to_string(),
                             error: error_msg,
                         });
@@ -220,7 +212,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     ));
                     failures.push(FetchFailure {
                         name: account.name.clone(),
-                        address_or_id: account.account_id.clone(),
                         chain_or_service: account.service.display_name().to_string(),
                         error: error_msg,
                     });
@@ -239,7 +230,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                         ));
                         failures.push(FetchFailure {
                             name: account.name.clone(),
-                            address_or_id: account.account_id.clone(),
                             chain_or_service: account.service.display_name().to_string(),
                             error: error_msg,
                         });
@@ -253,7 +243,6 @@ pub async fn fetch_all_balances(book: &AddressBook, rpc_url: Option<String>) -> 
                     ));
                     failures.push(FetchFailure {
                         name: account.name.clone(),
-                        address_or_id: account.account_id.clone(),
                         chain_or_service: account.service.display_name().to_string(),
                         error: error_msg,
                     });

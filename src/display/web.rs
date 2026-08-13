@@ -655,11 +655,11 @@ fn aggregate_crypto_holdings(
     }
     let mut buckets: HashMap<String, Bucket> = HashMap::new();
 
-    let mut fold = |buckets: &mut HashMap<String, Bucket>,
-                    symbol: &str,
-                    balance: f64,
-                    usd: Option<f64>,
-                    chain: &str| {
+    let fold = |buckets: &mut HashMap<String, Bucket>,
+                symbol: &str,
+                balance: f64,
+                usd: Option<f64>,
+                chain: &str| {
         if balance == 0.0 && usd.unwrap_or(0.0) == 0.0 {
             return;
         }

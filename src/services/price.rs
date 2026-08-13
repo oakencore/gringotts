@@ -79,13 +79,6 @@ impl PriceCache {
             format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
         }
     }
-
-    /// Check if the cache is considered stale (older than the given duration in minutes)
-    pub fn is_stale(&self, max_age_minutes: i64) -> bool {
-        let now = Utc::now();
-        let duration = now.signed_duration_since(self.updated_at);
-        duration.num_minutes() >= max_age_minutes
-    }
 }
 
 /// PriceService using Switchboard Surge for cryptocurrency prices
@@ -120,21 +113,6 @@ impl PriceService {
             surge_client,
             cache,
         })
-    }
-
-    /// Get a reference to the price cache
-    pub fn get_cache(&self) -> &PriceCache {
-        &self.cache
-    }
-
-    /// Save the current cache to disk
-    pub fn save_cache(&self) -> Result<()> {
-        self.cache.save()
-    }
-
-    /// Get cached prices without fetching from API
-    pub fn get_cached_prices(&self) -> &HashMap<String, f64> {
-        &self.cache.prices
     }
 
     /// Get the cache age as a human-readable string
@@ -208,90 +186,6 @@ impl PriceService {
                 anyhow::bail!("Failed to get price for {}: {}", symbol, e)
             }
         }
-    }
-
-    /// Get price for a single token symbol (e.g., "SOL", "ETH", "BTC")
-    /// Returns price in USD and updates cache
-    pub async fn get_single_price(&mut self, symbol: &str) -> Result<f64> {
-        let price = self.get_single_price_internal(symbol).await?;
-
-        // Update cache
-        self.cache.prices.insert(symbol.to_string(), price);
-        self.cache.updated_at = Utc::now();
-        let _ = self.cache.save();
-
-        Ok(price)
-    }
-
-    /// Fetch USD prices for multiple token mints (Solana-specific)
-    /// This maintains backward compatibility with existing Solana code
-    pub async fn get_prices(&mut self, mint_addresses: &[String]) -> Result<HashMap<String, f64>> {
-        if mint_addresses.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
-
-        let mut prices = HashMap::new();
-
-        // Map known Solana mints to symbols
-        for mint in mint_addresses {
-            let symbol = match mint.as_str() {
-                SOL_MINT => "SOL",
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" => "USDC",
-                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" => "USDT",
-                "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" => "MSOL",
-                "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj" => "stSOL",
-                "SW1TCHLmRGTfW5xZknqQdpdarB8PD95sJYWpNp9TbFx" => "SWTCH",
-                "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL" => "JTO",
-                "GP2vH92rxSHWm2VzttZBZdeFnv9LyfFJYvPrAet6pump" => "RAT",
-                _ => {
-                    eprintln!("Warning: Unknown mint address {}, skipping", mint);
-                    continue;
-                }
-            };
-
-            match self.get_single_price(symbol).await {
-                Ok(price) => {
-                    prices.insert(mint.clone(), price);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to fetch price for {} ({}): {}",
-                        symbol, mint, e
-                    );
-                }
-            }
-        }
-
-        Ok(prices)
-    }
-
-    /// Get ETH price in USD
-    pub async fn get_eth_price(&mut self) -> Result<f64> {
-        self.get_single_price("ETH").await
-    }
-
-    /// Get prices for ERC20 tokens (USDC, USDT, DAI, etc.)
-    pub async fn get_erc20_prices(&mut self, symbols: &[String]) -> Result<HashMap<String, f64>> {
-        if symbols.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut prices = HashMap::new();
-
-        for symbol in symbols {
-            match self.get_single_price(symbol).await {
-                Ok(price) => {
-                    prices.insert(symbol.clone(), price);
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to fetch price for {}: {}", symbol, e);
-                }
-            }
-        }
-
-        Ok(prices)
     }
 
     /// Batch fetch prices for a specific list of symbols
@@ -421,19 +315,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_get_sol_price() {
-        // This test requires SURGE_API_KEY environment variable
-        if env::var("SURGE_API_KEY").is_ok() {
-            let mut service = PriceService::new().expect("Failed to create price service");
-            let price = service.get_single_price("SOL").await;
-            assert!(price.is_ok());
-            let price = price.unwrap();
-            assert!(price > 0.0);
-            println!("SOL price: ${}", price);
-        }
-    }
-
-    #[tokio::test]
     async fn test_batch_fetch() {
         // This test requires SURGE_API_KEY environment variable
         if env::var("SURGE_API_KEY").is_ok() {
@@ -465,17 +346,5 @@ mod tests {
         // Test days
         cache.updated_at = Utc::now() - chrono::Duration::days(3);
         assert_eq!(cache.age_string(), "3 days ago");
-    }
-
-    #[test]
-    fn test_price_cache_is_stale() {
-        let mut cache = PriceCache::new();
-
-        // Fresh cache should not be stale
-        assert!(!cache.is_stale(5));
-
-        // Old cache should be stale
-        cache.updated_at = Utc::now() - chrono::Duration::minutes(10);
-        assert!(cache.is_stale(5));
     }
 }

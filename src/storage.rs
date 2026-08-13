@@ -398,38 +398,6 @@ impl AddressBook {
         Ok(())
     }
 
-    pub fn add_banking_account(
-        &mut self,
-        company: String,
-        name: String,
-        account_id: String,
-        service: String,
-    ) -> Result<()> {
-        // Trim whitespace from inputs
-        let company = company.trim().to_string();
-        let name = name.trim().to_string();
-        let account_id = account_id.trim().to_string();
-
-        // Check if name already exists in either addresses or banking accounts
-        if self.addresses.iter().any(|a| a.name == name) {
-            anyhow::bail!("Address with name '{}' already exists", name);
-        }
-        if self.banking_accounts.iter().any(|a| a.name == name) {
-            anyhow::bail!("Banking account with name '{}' already exists", name);
-        }
-
-        let service = BankingService::from_str(&service)?;
-
-        self.banking_accounts.push(BankingAccount {
-            company,
-            name,
-            account_id,
-            service,
-            manual_balance: None,
-        });
-        Ok(())
-    }
-
     /// Store a hand-entered USD balance on a Manual account, stamped with the
     /// current time so staleness is visible downstream.
     pub fn set_manual_balance(&mut self, name: &str, amount: f64) -> Result<()> {
