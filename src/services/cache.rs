@@ -134,7 +134,6 @@ impl BalanceCache {
     /// Move a cached balance to a new key after an account rename. Keeps the
     /// entry's timestamp (a rename is not a refresh) and updates the embedded
     /// name. No-op if the old key is missing or the names are equal.
-    #[allow(dead_code)]
     pub fn rename_balance(&mut self, old_name: &str, new_name: &str) {
         if old_name == new_name {
             return;
