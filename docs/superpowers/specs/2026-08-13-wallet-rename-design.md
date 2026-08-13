@@ -45,8 +45,10 @@ point of view.
 - Each row in the accounts list gets an edit affordance next to the name.
 - Clicking it swaps the name for a text input pre-filled with the current
   name (HTMX, matching existing patterns in `display/web.rs`).
-- Submit (Enter or button) sends the PATCH; success re-renders the affected
-  section with the new name. Escape or blur cancels and restores the label.
+- Submit (Enter or button) sends the PATCH; success triggers a full page
+  reload via `HX-Refresh` - the name is baked into row ids and hx-targets
+  across the page, so a section-only re-render can't stay consistent. Escape
+  or blur cancels and restores the label.
 - Validation errors (empty, collision) render inline next to the input.
 
 ## Testing

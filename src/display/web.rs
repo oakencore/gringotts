@@ -1507,6 +1507,21 @@ async fn refresh_all_balances(state: &Arc<AppState>) -> anyhow::Result<()> {
     // Mark full refresh
     let _ = state.cache.mark_refresh().await;
 
+    // Prune orphan cache entries left behind by renames/deletes that
+    // happened against the AddressBook snapshot loaded at the top of this
+    // function. Re-load fresh rather than reusing `book`, which may now be
+    // stale. Skip silently if the reload fails - never prune on a failed
+    // load, since an empty book would wipe the whole cache.
+    if let Ok(current_book) = AddressBook::load() {
+        let mut current_names: HashSet<String> = current_book
+            .addresses
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        current_names.extend(current_book.banking_accounts.iter().map(|a| a.name.clone()));
+        let _ = state.cache.retain_names(&current_names).await;
+    }
+
     Ok(())
 }
 
@@ -2941,12 +2956,15 @@ async fn rename_account(
 
     // Address book is saved; re-key the cached balance so the dashboard keeps
     // showing it under the new name. If this fails the entry is refetched
-    // under the new name on the next refresh - degraded, not broken.
-    if let Err(e) = state.cache.rename_balance(&name, &new_name).await {
-        eprintln!(
-            "Warning: failed to re-key cached balance after rename: {}",
-            e
-        );
+    // under the new name on the next refresh - degraded, not broken. Skip
+    // entirely on a same-name no-op to avoid rewriting cache.json for nothing.
+    if new_name != name {
+        if let Err(e) = state.cache.rename_balance(&name, &new_name).await {
+            eprintln!(
+                "Warning: failed to re-key cached balance after rename: {}",
+                e
+            );
+        }
     }
 
     // The name is baked into row ids, hx-targets, and detail ids across the

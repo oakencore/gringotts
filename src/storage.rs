@@ -143,7 +143,6 @@ pub struct BankingAccount {
 /// Why a rename was rejected. The web handler maps each variant to an
 /// HTTP status, so keep this exhaustive rather than stringly-typed.
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum RenameError {
     EmptyName,
     NameTaken,

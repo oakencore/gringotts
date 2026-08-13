@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,6 +144,13 @@ impl BalanceCache {
         }
     }
 
+    /// Remove cache entries whose key is not in `names`. Used after a full
+    /// refresh to prune orphans left behind by renames or deletes that
+    /// happened against a stale `AddressBook` snapshot mid-refresh.
+    pub fn retain_names(&mut self, names: &HashSet<String>) {
+        self.balances.retain(|name, _| names.contains(name));
+    }
+
     /// Get a cached balance if not stale
     pub fn get_balance(&self, name: &str, max_age_secs: u64) -> Option<&CachedBalance> {
         self.balances.get(name).and_then(|entry| {
@@ -258,6 +265,15 @@ impl SharedCache {
         {
             let mut cache = self.inner.write().await;
             cache.rename_balance(old_name, new_name);
+        }
+        self.persist().await
+    }
+
+    /// Prune orphan cache entries not present in `names`, then persist.
+    pub async fn retain_names(&self, names: &HashSet<String>) -> Result<()> {
+        {
+            let mut cache = self.inner.write().await;
+            cache.retain_names(names);
         }
         self.persist().await
     }
@@ -398,5 +414,30 @@ mod tests {
         // Renaming a missing key is a silent no-op.
         cache.rename_balance("Ghost", "Anything");
         assert!(cache.balances.get("Anything").is_none());
+    }
+
+    #[test]
+    fn test_retain_names_prunes_orphans() {
+        let mut cache = BalanceCache::new();
+        let balance = |name: &str| CachedBalance {
+            name: name.to_string(),
+            address_or_id: "test123".to_string(),
+            chain_or_service: "Solana".to_string(),
+            native_symbol: "SOL".to_string(),
+            native_balance: 10.0,
+            native_usd_value: Some(1000.0),
+            tokens: vec![],
+            total_usd_value: Some(1000.0),
+        };
+        cache.set_balance("Keep Me", balance("Keep Me"));
+        cache.set_balance("Orphan", balance("Orphan"));
+
+        let mut keep = HashSet::new();
+        keep.insert("Keep Me".to_string());
+        cache.retain_names(&keep);
+
+        assert!(cache.balances.get("Orphan").is_none());
+        let kept = cache.balances.get("Keep Me").expect("kept entry survives");
+        assert_eq!(kept.data.native_balance, 10.0);
     }
 }
