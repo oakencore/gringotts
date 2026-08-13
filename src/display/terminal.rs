@@ -3,6 +3,13 @@ use crate::chains::{aptos, evm, near, solana, starknet, sui};
 use crate::storage::{BankingAccount, BankingService, Chain, WalletAddress};
 use crate::types::FetchFailure;
 
+fn supply_suffix(token: &solana::TokenBalance) -> String {
+    match token.supply_percent {
+        Some(p) if p >= 0.01 => format!(" ({:.2}% of supply)", p),
+        _ => String::new(),
+    }
+}
+
 fn format_usd(value: f64) -> String {
     let formatted = format!("{:.2}", value);
     let parts: Vec<&str> = formatted.split('.').collect();
@@ -275,7 +282,7 @@ pub fn render_solana_balances(
             };
             lines.push(mint_display);
 
-            let balance_str = if let Some(usd_value) = token.usd_value {
+            let mut balance_str = if let Some(usd_value) = token.usd_value {
                 if let Some(price) = token.usd_price {
                     format!(
                         "    Balance: {:.6} (${} @ ${:.6})",
@@ -293,6 +300,7 @@ pub fn render_solana_balances(
             } else {
                 format!("    Balance: {:.6}", token.ui_amount)
             };
+            balance_str.push_str(&supply_suffix(token));
             lines.push(balance_str);
             lines.push(format!("    Decimals: {}", token.decimals));
         }

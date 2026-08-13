@@ -1550,6 +1550,8 @@ mod tests {
             ui_amount: 100.0,
             usd_price: None,
             usd_value: None,
+            total_supply: None,
+            supply_percent: None,
         });
 
         let wallet_balances = vec![WalletBalances::Solana(wallet, balances)];
@@ -1634,6 +1636,8 @@ mod tests {
                     ui_amount: 100.0,
                     usd_price: None,
                     usd_value: None,
+                    total_supply: None,
+                    supply_percent: None,
                 },
                 // Zero-amount holdings are dropped from the export
                 solana::TokenBalance {
@@ -1644,6 +1648,8 @@ mod tests {
                     ui_amount: 0.0,
                     usd_price: None,
                     usd_value: None,
+                    total_supply: None,
+                    supply_percent: None,
                 },
             ],
             total_usd_value: None,

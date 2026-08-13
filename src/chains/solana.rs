@@ -40,6 +40,17 @@ pub struct TokenBalance {
     pub ui_amount: f64,
     pub usd_price: Option<f64>,
     pub usd_value: Option<f64>,
+    #[allow(dead_code)] // not yet read outside this struct; kept for export-balances/snapshots
+    pub total_supply: Option<f64>, // ui units
+    pub supply_percent: Option<f64>, // 0-100
+}
+
+/// Percentage of total supply held, or None when supply data is missing/invalid.
+pub fn supply_percentage(ui_amount: f64, total_supply: f64) -> Option<f64> {
+    if total_supply <= 0.0 || !total_supply.is_finite() {
+        return None;
+    }
+    Some(ui_amount / total_supply * 100.0)
 }
 
 #[derive(Debug)]
@@ -100,6 +111,22 @@ impl SolanaClient {
         None
     }
 
+    // ponytail: HashMap is local to one wallet's get_balances call, not shared across
+    // wallets in a run. Good enough for the realistic duplicate case (token + token-2022
+    // ATAs for the same mint); a cross-wallet cache would need state threaded through query.rs.
+    fn get_token_supply_cached(
+        &self,
+        mint: &Pubkey,
+        cache: &mut HashMap<Pubkey, Option<f64>>,
+    ) -> Option<f64> {
+        *cache.entry(*mint).or_insert_with(|| {
+            self.client
+                .get_token_supply(mint)
+                .ok()
+                .and_then(|s| s.ui_amount)
+        })
+    }
+
     pub fn get_balances(&self, address: &str) -> Result<AccountBalances> {
         let pubkey = Pubkey::from_str(address).context("Invalid Solana address")?;
 
@@ -136,6 +163,7 @@ impl SolanaClient {
             .collect();
 
         let mut token_balances = Vec::new();
+        let mut supply_cache: HashMap<Pubkey, Option<f64>> = HashMap::new();
 
         for account in all_token_accounts {
             // Handle different UiAccountData formats
@@ -172,6 +200,11 @@ impl SolanaClient {
                                 .map(|(n, s)| (Some(n), Some(s)))
                                 .unwrap_or((None, None));
 
+                            let total_supply =
+                                self.get_token_supply_cached(&mint_pubkey, &mut supply_cache);
+                            let supply_percent =
+                                total_supply.and_then(|s| supply_percentage(ui_amount, s));
+
                             token_balances.push(TokenBalance {
                                 mint: mint_pubkey.to_string(),
                                 name,
@@ -180,6 +213,8 @@ impl SolanaClient {
                                 ui_amount,
                                 usd_price: None,
                                 usd_value: None,
+                                total_supply,
+                                supply_percent,
                             });
                         }
                     }
@@ -211,14 +246,22 @@ impl SolanaClient {
                                     .and_then(|u| u.as_f64())
                                     .unwrap_or(0.0);
 
-                                // Try to fetch metadata
-                                let (name, symbol) =
+                                // Try to fetch metadata and supply
+                                let (name, symbol, total_supply, supply_percent) =
                                     if let Ok(mint_pubkey) = Pubkey::from_str(&mint) {
-                                        self.get_token_metadata(&mint_pubkey)
+                                        let (name, symbol) = self
+                                            .get_token_metadata(&mint_pubkey)
                                             .map(|(n, s)| (Some(n), Some(s)))
-                                            .unwrap_or((None, None))
+                                            .unwrap_or((None, None));
+                                        let total_supply = self.get_token_supply_cached(
+                                            &mint_pubkey,
+                                            &mut supply_cache,
+                                        );
+                                        let supply_percent = total_supply
+                                            .and_then(|s| supply_percentage(ui_amount, s));
+                                        (name, symbol, total_supply, supply_percent)
                                     } else {
-                                        (None, None)
+                                        (None, None, None, None)
                                     };
 
                                 token_balances.push(TokenBalance {
@@ -229,6 +272,8 @@ impl SolanaClient {
                                     ui_amount,
                                     usd_price: None,
                                     usd_value: None,
+                                    total_supply,
+                                    supply_percent,
                                 });
                             }
                         }
@@ -403,5 +448,26 @@ impl crate::types::PriceEnrichable for AccountBalances {
             }
         }
         token_total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supply_percentage_basic() {
+        assert_eq!(supply_percentage(50.0, 10_000.0), Some(0.5));
+    }
+
+    #[test]
+    fn test_supply_percentage_full() {
+        assert_eq!(supply_percentage(100.0, 100.0), Some(100.0));
+    }
+
+    #[test]
+    fn test_supply_percentage_zero_or_invalid_supply() {
+        assert_eq!(supply_percentage(50.0, 0.0), None);
+        assert_eq!(supply_percentage(50.0, -1.0), None);
     }
 }
