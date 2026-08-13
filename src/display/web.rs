@@ -641,6 +641,26 @@ struct CashRow {
     usd_value: Option<f64>,
 }
 
+/// Derive a symbol's USD price and value from the price cache, honored in
+/// this priority: an explicit per-wallet value wins, USD always prices at
+/// 1.0, otherwise fall back to `amount * cached price`. Shared by the
+/// dashboard aggregators, the per-wallet TSV export, and the cache export
+/// rows, which all repeat this derivation over `cache.prices.data`.
+fn derive_usd(
+    prices: &HashMap<String, f64>,
+    symbol: &str,
+    amount: f64,
+    explicit: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let price = if symbol == "USD" {
+        Some(1.0)
+    } else {
+        prices.get(symbol).copied()
+    };
+    let value = explicit.or_else(|| price.map(|p| amount * p));
+    (price, value)
+}
+
 /// Aggregate cached crypto holdings across every wallet in the book by
 /// symbol. Native balance and SPL/ERC-20 tokens both contribute. Banking
 /// accounts are intentionally excluded (see `aggregate_cash_holdings`).
@@ -690,9 +710,6 @@ fn aggregate_crypto_holdings(
     // a quote for the symbol. Fall back to balance * price when the per-wallet
     // value is missing so the aggregated row still gets a Price/Value.
     let global_prices = &cache.prices.data;
-    let derive_usd = |symbol: &str, balance: f64, explicit: Option<f64>| -> Option<f64> {
-        explicit.or_else(|| global_prices.get(symbol).map(|p| balance * p))
-    };
 
     for (name, entry) in &cache.balances {
         if !active_wallets.contains(name.as_str()) {
@@ -704,10 +721,12 @@ fn aggregate_crypto_holdings(
             &cached.native_symbol,
             cached.native_balance,
             derive_usd(
+                global_prices,
                 &cached.native_symbol,
                 cached.native_balance,
                 cached.native_usd_value,
-            ),
+            )
+            .1,
             &cached.chain_or_service,
             None,
         );
@@ -716,7 +735,7 @@ fn aggregate_crypto_holdings(
                 &mut buckets,
                 &token.symbol,
                 token.balance,
-                derive_usd(&token.symbol, token.balance, token.usd_value),
+                derive_usd(global_prices, &token.symbol, token.balance, token.usd_value).1,
                 &cached.chain_or_service,
                 token.supply_percent,
             );
@@ -798,12 +817,6 @@ fn cache_export_rows(
     }
 
     let prices = &cache.prices.data;
-    let price_of = |symbol: &str| -> Option<f64> {
-        if symbol == "USD" {
-            return Some(1.0);
-        }
-        prices.get(symbol).copied()
-    };
 
     let mut rows = Vec::new();
     for (name, entry) in &cache.balances {
@@ -815,7 +828,7 @@ fn cache_export_rows(
             if amount == 0.0 {
                 return;
             }
-            let usd_price = price_of(symbol);
+            let (usd_price, usd_value) = derive_usd(prices, symbol, amount, explicit);
             rows.push(crate::query::ExportRow {
                 company: company.to_string(),
                 account: cached.name.clone(),
@@ -823,7 +836,7 @@ fn cache_export_rows(
                 symbol: symbol.to_string(),
                 amount,
                 usd_price,
-                usd_value: explicit.or_else(|| usd_price.map(|p| amount * p)),
+                usd_value,
                 as_of: as_of.to_string(),
             });
         };
@@ -902,9 +915,6 @@ fn per_wallet_tsv(
 ) -> String {
     let mut tsv = String::from("Company\tWallet\tChain\tSymbol\tAmount\tUSD Value\n");
     let prices = &cache.prices.data;
-    let derive_usd = |symbol: &str, balance: f64, explicit: Option<f64>| -> Option<f64> {
-        explicit.or_else(|| prices.get(symbol).map(|p| balance * p))
-    };
 
     for w in &book.addresses {
         let Some(c) = cache.get_balance_unchecked(&w.name) else {
@@ -932,13 +942,19 @@ fn per_wallet_tsv(
         emit(
             &c.native_symbol,
             c.native_balance,
-            derive_usd(&c.native_symbol, c.native_balance, c.native_usd_value),
+            derive_usd(
+                prices,
+                &c.native_symbol,
+                c.native_balance,
+                c.native_usd_value,
+            )
+            .1,
         );
         for t in &c.tokens {
             emit(
                 &t.symbol,
                 t.balance,
-                derive_usd(&t.symbol, t.balance, t.usd_value),
+                derive_usd(prices, &t.symbol, t.balance, t.usd_value).1,
             );
         }
     }
@@ -1667,8 +1683,12 @@ async fn cached_export_rows(state: &Arc<AppState>) -> Result<Vec<crate::query::E
     let book = AddressBook::load().map_err(|e| format!("Failed to load accounts: {}", e))?;
     let cache = state.cache.read().await;
     // The cache's last refresh is the true as-of for these numbers, not now().
-    let as_of = cache
+    // Per-wallet refreshes don't set last_full_refresh, so fall back to the
+    // newest per-entry cache timestamp rather than emitting an empty column.
+    let as_of_ts = cache
         .last_full_refresh
+        .or_else(|| cache.balances.values().map(|entry| entry.timestamp).max());
+    let as_of = as_of_ts
         .and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0))
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_default();
@@ -1707,11 +1727,21 @@ async fn export_balances_csv(State(state): State<Arc<AppState>>) -> Response {
 
 /// Write the cached portfolio to ~/.gringotts/snapshots/<timestamp>.json.
 /// Returns an HTML fragment HTMX drops next to the button.
+///
+/// Deliberately always 200, unlike rename_account/add_account which return
+/// non-2xx plain text for the shared htmx:responseError listener: the status
+/// span swaps directly into #snapshot-status via hx-target/hx-swap, and a
+/// non-2xx response would not be swapped in at all.
 async fn write_cache_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = |class: &str, text: String| {
+        let class_attr = if class.is_empty() {
+            String::new()
+        } else {
+            format!(" class=\"{}\"", class)
+        };
         Html(format!(
-            "<span class=\"snapshot-status {}\">{}</span>",
-            class,
+            "<span{}>{}</span>",
+            class_attr,
             html_attr_escape(&text)
         ))
     };

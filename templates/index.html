@@ -488,6 +488,19 @@
 </style>
 
 <script>
+    // Propagate ?api_key= from the page URL to HTMX requests (X-API-Key
+    // header) and to the plain CSV export link, since neither inherits it
+    // automatically when auth is enabled.
+    (function () {
+        var apiKey = new URLSearchParams(window.location.search).get('api_key');
+        if (!apiKey) return;
+        document.body.addEventListener('htmx:configRequest', function (evt) {
+            evt.detail.headers['X-API-Key'] = apiKey;
+        });
+        var csvLink = document.querySelector('a[href="/export/balances.csv"]');
+        if (csvLink) csvLink.href = '/export/balances.csv?api_key=' + encodeURIComponent(apiKey);
+    })();
+
     // Show loading state using template cloning (safer than innerHTML)
     function showLoadingState() {
         var template = document.getElementById('loading-template');
