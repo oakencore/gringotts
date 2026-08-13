@@ -314,6 +314,12 @@ impl AddressBook {
         if new_name.is_empty() {
             return Err(RenameError::EmptyName);
         }
+        // Check that old_name exists before checking new_name collision
+        let exists = self.addresses.iter().any(|a| a.name == old_name)
+            || self.banking_accounts.iter().any(|a| a.name == old_name);
+        if !exists {
+            return Err(RenameError::NotFound);
+        }
         if new_name != old_name
             && (self.addresses.iter().any(|a| a.name == new_name)
                 || self.banking_accounts.iter().any(|a| a.name == new_name))
@@ -328,8 +334,6 @@ impl AddressBook {
             .find(|a| a.name == old_name)
         {
             b.name = new_name.to_string();
-        } else {
-            return Err(RenameError::NotFound);
         }
         Ok(new_name.to_string())
     }
@@ -511,6 +515,15 @@ mod tests {
         let mut b = book();
         assert_eq!(
             b.rename_account("Nope", "Whatever"),
+            Err(RenameError::NotFound)
+        );
+    }
+
+    #[test]
+    fn rename_unknown_source_beats_name_taken() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Nope", "Hot Wallet"),
             Err(RenameError::NotFound)
         );
     }
