@@ -222,6 +222,8 @@ The web server binds to `0.0.0.0`, making it accessible to all devices on your l
 - Sharing read-only access with team members on the same network
 - Running on a server and accessing from other computers
 
+Account names can be renamed inline from the dashboard, and errors from adding an account (e.g. duplicate name) are shown directly in the Add Account modal.
+
 ### Supported Chains
 
 **Layer 1**

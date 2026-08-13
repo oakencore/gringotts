@@ -13,7 +13,7 @@
         </p>
     </div>
     <div class="header-actions">
-        <button class="btn btn-primary" onclick="document.getElementById('add-wallet-modal').showModal()">
+        <button class="btn btn-primary" onclick="clearAddFormError(); document.getElementById('add-wallet-modal').showModal()">
             <i data-lucide="plus"></i>
             <span>Add Wallet</span>
         </button>
@@ -324,6 +324,7 @@
                     <option value="starknet">Starknet</option>
                 </select>
             </div>
+            <div class="form-error rename-error" hidden></div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
                 <button type="submit" class="btn btn-primary">Add Account</button>
@@ -468,9 +469,17 @@
     function handleFormSubmit(event) {
         if (event.detail.successful) {
             event.target.reset();
+            clearAddFormError();
             document.getElementById('add-wallet-modal').close();
             window.location.reload();
         }
+    }
+
+    // Clear the add-account error banner (on reopen and on success)
+    function clearAddFormError() {
+        var err = document.querySelector('#add-wallet-modal .form-error');
+        err.textContent = '';
+        err.hidden = true;
     }
 
     // Close modal on click outside
@@ -527,6 +536,12 @@
             form.hidden = false;
             form.previousElementSibling.hidden = true;
             form.querySelector('.rename-error').textContent = evt.detail.xhr.responseText;
+            return;
+        }
+        if (evt.detail.elt.getAttribute && evt.detail.elt.getAttribute('hx-post') === '/accounts') {
+            const err = evt.detail.elt.querySelector('.form-error');
+            err.textContent = evt.detail.xhr.responseText;
+            err.hidden = false;
         }
     });
 </script>
