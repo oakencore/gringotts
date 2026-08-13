@@ -305,10 +305,15 @@ gringotts query --no-prices
 
 # Useful for quick balance checks or when price service is down
 gringotts query-one "Wallet" --no-prices
+
+# Query all balances and save a dated JSON snapshot
+gringotts query --snapshot
 ```
 ## Storage
 
 Addresses and banking accounts are stored in: `~/.gringotts/addresses.json`
+
+Portfolio snapshots are written to: `~/.gringotts/snapshots/<timestamp>.json`
 
 ## Architecture
 

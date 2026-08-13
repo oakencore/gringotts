@@ -534,7 +534,7 @@ fn enrich_and_display_balances(
     portfolio
 }
 
-pub async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
+pub async fn query_all(rpc_url: Option<String>, no_prices: bool, snapshot: bool) -> Result<()> {
     let book = AddressBook::load()?;
 
     if book.addresses.is_empty() && book.banking_accounts.is_empty() {
@@ -582,7 +582,28 @@ pub async fn query_all(rpc_url: Option<String>, no_prices: bool) -> Result<()> {
         ui::render_fetch_failures(&fetch_result.failures);
     }
 
+    if snapshot {
+        let path = write_snapshot(&portfolio)?;
+        println!("Snapshot written to {}", path.display());
+    }
+
     Ok(())
+}
+
+fn snapshot_filename(timestamp: &str) -> String {
+    format!("{}.json", timestamp.replace(':', "-"))
+}
+
+fn write_snapshot(portfolio: &PortfolioSummary) -> Result<std::path::PathBuf> {
+    let dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?
+        .join(".gringotts")
+        .join("snapshots");
+    std::fs::create_dir_all(&dir)?;
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let path = dir.join(snapshot_filename(&ts));
+    std::fs::write(&path, serde_json::to_string_pretty(portfolio)?)?;
+    Ok(path)
 }
 
 pub async fn query_one(identifier: String, rpc_url: Option<String>, no_prices: bool) -> Result<()> {
@@ -1488,6 +1509,13 @@ pub async fn export_balances(
 mod tests {
     use super::*;
     use crate::storage::Chain;
+
+    #[test]
+    fn test_snapshot_filename_replaces_colons() {
+        let name = snapshot_filename("2026-08-13T14:03:22Z");
+        assert_eq!(name, "2026-08-13T14-03-22Z.json");
+        assert!(!name.contains(':'));
+    }
 
     #[test]
     fn test_extract_token_symbols_empty() {

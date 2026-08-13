@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::banking::{circle, mercury};
 use crate::chains::{aptos, evm, near, solana, starknet, sui};
 use crate::storage::{BankingAccount, WalletAddress};
 
 // Portfolio summary structure
+#[derive(Serialize)]
 pub struct PortfolioSummary {
     pub companies: HashMap<String, CompanyAssets>,
     pub total_usd_value: f64,
 }
 
+#[derive(Serialize)]
 pub struct CompanyAssets {
     pub assets: HashMap<String, AssetSummary>,
     pub wallets: HashMap<String, WalletAssets>,
@@ -22,12 +26,14 @@ pub struct CompanyAssets {
 /// `CompanyAssets.wallets`. The field exists for ergonomic iteration
 /// (`for w in company.wallets.values() { use w.name }`), matching the
 /// existing convention on `AssetSummary.symbol`.
+#[derive(Serialize)]
 pub struct WalletAssets {
     pub name: String,
     pub assets: HashMap<String, AssetSummary>,
     pub total_usd_value: f64,
 }
 
+#[derive(Serialize)]
 pub struct AssetSummary {
     pub symbol: String,
     pub amount: f64,

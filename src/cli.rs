@@ -94,6 +94,10 @@ pub enum Commands {
         /// Skip price lookups (faster, no USD values)
         #[arg(long)]
         no_prices: bool,
+
+        /// Write portfolio snapshot JSON to ~/.gringotts/snapshots/
+        #[arg(long)]
+        snapshot: bool,
     },
 
     /// Query balances for a specific address or banking account by name

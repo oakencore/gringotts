@@ -38,8 +38,12 @@ async fn main() -> Result<()> {
         Commands::Remove { identifier } => {
             remove_address(identifier)?;
         }
-        Commands::Query { rpc_url, no_prices } => {
-            query::query_all(rpc_url, no_prices).await?;
+        Commands::Query {
+            rpc_url,
+            no_prices,
+            snapshot,
+        } => {
+            query::query_all(rpc_url, no_prices, snapshot).await?;
         }
         Commands::QueryOne {
             name,
