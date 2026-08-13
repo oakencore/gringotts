@@ -199,6 +199,11 @@ fn list_addresses(company_filter: Option<String>) -> Result<()> {
 }
 
 fn remove_address(identifier: String) -> Result<()> {
+    if identifier.is_empty() {
+        ui::render_error("Identifier cannot be empty");
+        return Ok(());
+    }
+
     let mut book = AddressBook::load()?;
 
     // Try to remove by name first

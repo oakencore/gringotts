@@ -1145,7 +1145,7 @@ pub async fn export_transactions(
 }
 
 fn escape_csv(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -1219,15 +1219,14 @@ fn balances_to_rows(
     let mut rows: Vec<ExportRow> = Vec::new();
 
     // Zero-amount holdings are skipped, matching add_asset_to_portfolio.
-    let push = |rows: &mut Vec<ExportRow>,
-                company: &str,
-                account: &str,
-                chain_or_service: &str,
-                symbol: &str,
-                amount: f64,
-                usd_price: Option<f64>,
-                usd_value: Option<f64>,
-                as_of: &str| {
+    let mut push = |company: &str,
+                    account: &str,
+                    chain_or_service: &str,
+                    symbol: &str,
+                    amount: f64,
+                    usd_price: Option<f64>,
+                    usd_value: Option<f64>,
+                    as_of: &str| {
         if amount == 0.0 {
             return;
         }
@@ -1249,7 +1248,6 @@ fn balances_to_rows(
                 balances.enrich_from_cache(price_cache);
                 let chain = wallet.chain.display_name();
                 push(
-                    &mut rows,
                     &wallet.company,
                     &wallet.name,
                     chain,
@@ -1262,7 +1260,6 @@ fn balances_to_rows(
                 for token in &balances.token_balances {
                     if let Some(symbol) = &token.symbol {
                         push(
-                            &mut rows,
                             &wallet.company,
                             &wallet.name,
                             chain,
@@ -1279,7 +1276,6 @@ fn balances_to_rows(
                 balances.enrich_from_cache(price_cache);
                 let chain = wallet.chain.display_name();
                 push(
-                    &mut rows,
                     &wallet.company,
                     &wallet.name,
                     chain,
@@ -1292,7 +1288,6 @@ fn balances_to_rows(
                 for token in &balances.token_balances {
                     if let Some(symbol) = &token.symbol {
                         push(
-                            &mut rows,
                             &wallet.company,
                             &wallet.name,
                             chain,
@@ -1308,7 +1303,6 @@ fn balances_to_rows(
             WalletBalances::Near(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
                 push(
-                    &mut rows,
                     &wallet.company,
                     &wallet.name,
                     wallet.chain.display_name(),
@@ -1322,7 +1316,6 @@ fn balances_to_rows(
             WalletBalances::Aptos(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
                 push(
-                    &mut rows,
                     &wallet.company,
                     &wallet.name,
                     wallet.chain.display_name(),
@@ -1336,7 +1329,6 @@ fn balances_to_rows(
             WalletBalances::Sui(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
                 push(
-                    &mut rows,
                     &wallet.company,
                     &wallet.name,
                     wallet.chain.display_name(),
@@ -1350,7 +1342,6 @@ fn balances_to_rows(
             WalletBalances::Starknet(wallet, mut balances) => {
                 balances.enrich_from_cache(price_cache);
                 push(
-                    &mut rows,
                     &wallet.company,
                     &wallet.name,
                     wallet.chain.display_name(),
@@ -1363,7 +1354,6 @@ fn balances_to_rows(
             }
             WalletBalances::Mercury(account, balances) => {
                 push(
-                    &mut rows,
                     &account.company,
                     &account.name,
                     account.service.display_name(),
@@ -1383,7 +1373,6 @@ fn balances_to_rows(
                         (None, None)
                     };
                     push(
-                        &mut rows,
                         &account.company,
                         &account.name,
                         account.service.display_name(),
@@ -1408,7 +1397,6 @@ fn balances_to_rows(
                     .map(|m| m.updated_at.as_str())
                     .unwrap_or(as_of);
                 push(
-                    &mut rows,
                     &account.company,
                     &account.name,
                     account.service.display_name(),
@@ -1485,8 +1473,7 @@ pub async fn export_balances(
 
     match output {
         Some(path) => {
-            let mut file = std::fs::File::create(&path)?;
-            file.write_all(output_data.as_bytes())?;
+            std::fs::write(&path, &output_data)?;
             eprintln!("Exported {} rows to {}", rows.len(), path);
         }
         None => {
@@ -1550,7 +1537,6 @@ mod tests {
             ui_amount: 100.0,
             usd_price: None,
             usd_value: None,
-            total_supply: None,
             supply_percent: None,
         });
 
@@ -1636,7 +1622,6 @@ mod tests {
                     ui_amount: 100.0,
                     usd_price: None,
                     usd_value: None,
-                    total_supply: None,
                     supply_percent: None,
                 },
                 // Zero-amount holdings are dropped from the export
@@ -1648,7 +1633,6 @@ mod tests {
                     ui_amount: 0.0,
                     usd_price: None,
                     usd_value: None,
-                    total_supply: None,
                     supply_percent: None,
                 },
             ],

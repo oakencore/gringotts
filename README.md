@@ -5,7 +5,7 @@ Multi-chain cryptocurrency portfolio tracker with banking integration. Track bal
 ## Features
 
 - **Multi-chain support**: Solana, Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Avalanche, Core, NEAR, Aptos, Sui, Starknet
-- **Supply context**: Solana token balances show the holder's percentage of total supply (when >= 0.01%)
+- **Supply context**: Solana token balances in terminal query output show the holder's percentage of total supply (when >= 0.01%)
 - **Banking integration**: Mercury, Circle, manual accounts (hand-entered balances)
 - **Real-time pricing**: USD values via Switchboard Surge
 - **Portfolio aggregation**: Group assets by company/organization

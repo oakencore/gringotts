@@ -3893,6 +3893,7 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                 ),
                 None => String::new(),
             };
+            let a = amount.unwrap_or(0.0);
             Html(
                 SingleBalanceTemplate {
                     name: account.name.clone(),
@@ -3903,10 +3904,10 @@ async fn query_bank_balance(account: &crate::storage::BankingAccount) -> Html<St
                     } else {
                         String::new()
                     },
-                    native_balance: amount.unwrap_or(0.0),
-                    native_usd: amount.unwrap_or(0.0),
+                    native_balance: a,
+                    native_usd: a,
                     tokens: vec![],
-                    total_usd: amount.unwrap_or(0.0),
+                    total_usd: a,
                     tsv_export: tsv,
                     error: match amount {
                         Some(_) => String::new(),

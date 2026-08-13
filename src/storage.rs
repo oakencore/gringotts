@@ -433,6 +433,10 @@ impl AddressBook {
     /// Store a hand-entered USD balance on a Manual account, stamped with the
     /// current time so staleness is visible downstream.
     pub fn set_manual_balance(&mut self, name: &str, amount: f64) -> Result<()> {
+        if !amount.is_finite() {
+            anyhow::bail!("Balance must be a finite number");
+        }
+
         let account = self
             .banking_accounts
             .iter_mut()
@@ -455,6 +459,10 @@ impl AddressBook {
     }
 
     pub fn remove_banking_account_by_identifier(&mut self, identifier: &str) -> Result<()> {
+        if identifier.is_empty() {
+            anyhow::bail!("Identifier cannot be empty");
+        }
+
         let initial_len = self.banking_accounts.len();
         // Remove by name or account_id
         self.banking_accounts
