@@ -131,6 +131,20 @@ impl BalanceCache {
             .insert(name.to_string(), CacheEntry::new(balance));
     }
 
+    /// Move a cached balance to a new key after an account rename. Keeps the
+    /// entry's timestamp (a rename is not a refresh) and updates the embedded
+    /// name. No-op if the old key is missing or the names are equal.
+    #[allow(dead_code)]
+    pub fn rename_balance(&mut self, old_name: &str, new_name: &str) {
+        if old_name == new_name {
+            return;
+        }
+        if let Some(mut entry) = self.balances.remove(old_name) {
+            entry.data.name = new_name.to_string();
+            self.balances.insert(new_name.to_string(), entry);
+        }
+    }
+
     /// Get a cached balance if not stale
     pub fn get_balance(&self, name: &str, max_age_secs: u64) -> Option<&CachedBalance> {
         self.balances.get(name).and_then(|entry| {
@@ -236,6 +250,16 @@ impl SharedCache {
         {
             let mut cache = self.inner.write().await;
             cache.set_balance(name, balance);
+        }
+        self.persist().await
+    }
+
+    /// Re-key a cached balance after an account rename, then persist.
+    #[allow(dead_code)]
+    pub async fn rename_balance(&self, old_name: &str, new_name: &str) -> Result<()> {
+        {
+            let mut cache = self.inner.write().await;
+            cache.rename_balance(old_name, new_name);
         }
         self.persist().await
     }
@@ -346,5 +370,35 @@ mod tests {
         cache.mark_full_refresh();
         let age_str = cache.cache_age_string();
         assert!(age_str.contains("s ago") || age_str.contains("0s"));
+    }
+
+    #[test]
+    fn test_rename_balance_rekeys_entry() {
+        let mut cache = BalanceCache::new();
+        let balance = CachedBalance {
+            name: "Old Name".to_string(),
+            address_or_id: "test123".to_string(),
+            chain_or_service: "Solana".to_string(),
+            native_symbol: "SOL".to_string(),
+            native_balance: 10.0,
+            native_usd_value: Some(1000.0),
+            tokens: vec![],
+            total_usd_value: Some(1000.0),
+        };
+        cache.set_balance("Old Name", balance);
+        let original_ts = cache.balances["Old Name"].timestamp;
+
+        cache.rename_balance("Old Name", "New Name");
+
+        assert!(cache.balances.get("Old Name").is_none());
+        let entry = cache.balances.get("New Name").expect("entry re-keyed");
+        assert_eq!(entry.data.name, "New Name");
+        assert_eq!(entry.data.native_balance, 10.0);
+        // Rename must not reset freshness.
+        assert_eq!(entry.timestamp, original_ts);
+
+        // Renaming a missing key is a silent no-op.
+        cache.rename_balance("Ghost", "Anything");
+        assert!(cache.balances.get("Anything").is_none());
     }
 }
