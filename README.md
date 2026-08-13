@@ -10,6 +10,7 @@ Multi-chain cryptocurrency portfolio tracker with banking integration. Track bal
 - **Portfolio aggregation**: Group assets by company/organization
 - **Web interface**: HTMX-powered dashboard
 - **Transaction export**: CSV/JSON export for banking transactions
+- **Balance export**: CSV/JSON snapshot of all current balances
 - **Auto-detection**: Automatically detects chain from address format
 - **Premium RPC support**: Auto-detects Helius (Solana) and Alchemy (EVM) API keys
 
@@ -179,6 +180,21 @@ gringotts export-transactions "Operating Account" --start 2025-01-01 --end 2025-
 
 # Export to file
 gringotts export-transactions "Operating Account" --output transactions.csv
+```
+
+#### Balance Export
+
+Export current balances for every tracked address and account to CSV or JSON. Each row is one asset: company, account, chain or service, symbol, amount, USD price, USD value, and an as-of timestamp. Progress output goes to stderr, so stdout is safe to pipe.
+
+```bash
+# Export to CSV on stdout (default)
+gringotts export-balances
+
+# Export to JSON
+gringotts export-balances --format json
+
+# Export to a file, skipping price lookups
+gringotts export-balances --output balances.csv --no-prices
 ```
 
 ### Organisation

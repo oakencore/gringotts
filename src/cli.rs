@@ -15,7 +15,8 @@ use clap::{Parser, Subcommand};
   gringotts query-one \"My Wallet\"
   gringotts setup-mercury -c CompanyName
   gringotts export-transactions \"Checking\" --start 2025-01-01 --end 2025-01-31
-  gringotts export-transactions \"Checking\" -f json -o transactions.json")]
+  gringotts export-transactions \"Checking\" -f json -o transactions.json
+  gringotts export-balances -f json -o balances.json")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -139,6 +140,21 @@ pub enum Commands {
         /// Output file path (defaults to stdout)
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// Export current balances for all tracked addresses and accounts
+    ExportBalances {
+        /// Output format (csv or json)
+        #[arg(short, long, default_value = "csv")]
+        format: String,
+
+        /// Output file path (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Skip price lookups (faster, no USD values)
+        #[arg(long)]
+        no_prices: bool,
     },
 
     /// Start the web server with HTMX frontend

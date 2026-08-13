@@ -95,6 +95,13 @@ async fn main() -> Result<()> {
         } => {
             query::export_transactions(name, format, start, end, output).await?;
         }
+        Commands::ExportBalances {
+            format,
+            output,
+            no_prices,
+        } => {
+            query::export_balances(format, output, no_prices).await?;
+        }
         Commands::Serve {
             port,
             refresh_interval,
