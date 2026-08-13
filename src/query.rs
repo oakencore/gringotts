@@ -1134,10 +1134,21 @@ pub async fn export_transactions(
 }
 
 fn escape_csv(s: &str) -> String {
+    let needs_formula_guard = match s.chars().next() {
+        Some('=') | Some('+') | Some('@') | Some('\t') => true,
+        Some('-') => s.parse::<f64>().is_err(),
+        _ => false,
+    };
+    let s = if needs_formula_guard {
+        format!("'{}", s)
+    } else {
+        s.to_string()
+    };
+
     if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
-        s.to_string()
+        s
     }
 }
 
@@ -1587,6 +1598,22 @@ mod tests {
         assert_eq!(escape_csv("a,b"), "\"a,b\"");
         assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(escape_csv("two\nlines"), "\"two\nlines\"");
+
+        // Formula injection guards
+        assert_eq!(
+            escape_csv("=HYPERLINK(\"evil\")"),
+            "\"'=HYPERLINK(\"\"evil\"\")\""
+        );
+        assert_eq!(escape_csv("+1234"), "'+1234");
+        assert_eq!(escape_csv("@SUM(A1:A2)"), "'@SUM(A1:A2)");
+        assert_eq!(escape_csv("\tcmd"), "'\tcmd");
+
+        // Negative numbers pass through unmangled
+        assert_eq!(escape_csv("-123.45"), "-123.45");
+        assert_eq!(escape_csv("-42"), "-42");
+
+        // Non-numeric field starting with '-' gets prefixed
+        assert_eq!(escape_csv("-cmd|calc"), "'-cmd|calc");
     }
 
     #[test]
