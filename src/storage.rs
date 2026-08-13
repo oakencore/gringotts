@@ -140,6 +140,26 @@ pub struct BankingAccount {
     pub service: BankingService,
 }
 
+/// Why a rename was rejected. The web handler maps each variant to an
+/// HTTP status, so keep this exhaustive rather than stringly-typed.
+#[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum RenameError {
+    EmptyName,
+    NameTaken,
+    NotFound,
+}
+
+impl std::fmt::Display for RenameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenameError::EmptyName => write!(f, "Name cannot be empty"),
+            RenameError::NameTaken => write!(f, "An account with that name already exists"),
+            RenameError::NotFound => write!(f, "Account not found"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddressBook {
     pub addresses: Vec<WalletAddress>,
@@ -280,6 +300,40 @@ impl AddressBook {
         Ok(())
     }
 
+    /// Rename a wallet or banking account, matched by exact name (wallets
+    /// first, mirroring the web UI's delete handler). Trims the new name and
+    /// returns the trimmed value so callers can re-key derived state (the
+    /// balance cache) with exactly what was stored.
+    #[allow(dead_code)]
+    pub fn rename_account(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<String, RenameError> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(RenameError::EmptyName);
+        }
+        if new_name != old_name
+            && (self.addresses.iter().any(|a| a.name == new_name)
+                || self.banking_accounts.iter().any(|a| a.name == new_name))
+        {
+            return Err(RenameError::NameTaken);
+        }
+        if let Some(w) = self.addresses.iter_mut().find(|a| a.name == old_name) {
+            w.name = new_name.to_string();
+        } else if let Some(b) = self
+            .banking_accounts
+            .iter_mut()
+            .find(|a| a.name == old_name)
+        {
+            b.name = new_name.to_string();
+        } else {
+            return Err(RenameError::NotFound);
+        }
+        Ok(new_name.to_string())
+    }
+
     fn get_storage_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Failed to get home directory")?;
 
@@ -361,5 +415,103 @@ impl AddressBook {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book() -> AddressBook {
+        AddressBook {
+            addresses: vec![WalletAddress {
+                company: "Acme".to_string(),
+                name: "Hot Wallet".to_string(),
+                address: "abc123".to_string(),
+                chain: Chain::Solana,
+            }],
+            banking_accounts: vec![BankingAccount {
+                company: "Acme".to_string(),
+                name: "Mercury Checking".to_string(),
+                account_id: "m-1".to_string(),
+                service: BankingService::Mercury,
+            }],
+        }
+    }
+
+    #[test]
+    fn rename_wallet_succeeds() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Hot Wallet", "Cold Wallet"),
+            Ok("Cold Wallet".to_string())
+        );
+        assert_eq!(b.addresses[0].name, "Cold Wallet");
+    }
+
+    #[test]
+    fn rename_banking_account_succeeds() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Mercury Checking", "Mercury Ops"),
+            Ok("Mercury Ops".to_string())
+        );
+        assert_eq!(b.banking_accounts[0].name, "Mercury Ops");
+    }
+
+    #[test]
+    fn rename_trims_whitespace() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Hot Wallet", "  Cold Wallet  "),
+            Ok("Cold Wallet".to_string())
+        );
+        assert_eq!(b.addresses[0].name, "Cold Wallet");
+    }
+
+    #[test]
+    fn rename_rejects_empty_name() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Hot Wallet", "   "),
+            Err(RenameError::EmptyName)
+        );
+        assert_eq!(b.addresses[0].name, "Hot Wallet");
+    }
+
+    #[test]
+    fn rename_rejects_collision_with_wallet() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Mercury Checking", "Hot Wallet"),
+            Err(RenameError::NameTaken)
+        );
+    }
+
+    #[test]
+    fn rename_rejects_collision_with_banking_account() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Hot Wallet", "Mercury Checking"),
+            Err(RenameError::NameTaken)
+        );
+    }
+
+    #[test]
+    fn rename_to_same_name_is_noop_success() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Hot Wallet", "Hot Wallet"),
+            Ok("Hot Wallet".to_string())
+        );
+    }
+
+    #[test]
+    fn rename_unknown_name_is_not_found() {
+        let mut b = book();
+        assert_eq!(
+            b.rename_account("Nope", "Whatever"),
+            Err(RenameError::NotFound)
+        );
     }
 }
